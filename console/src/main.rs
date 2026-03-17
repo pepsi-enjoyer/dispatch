@@ -4,6 +4,7 @@
 // dispatch-e0k.2: keyboard input forwarding to PTY
 // dispatch-e0k.3: bd create integration from Rust
 // dispatch-bgz.4: modal input model (command mode / input mode)
+// dispatch-bgz.5: full command mode keybindings
 // dispatch-bgz.9: beads task lifecycle (create, assign, close, reopen)
 // dispatch-bgz.10: pane info strip and header bar
 // dispatch-bgz.12: config file and CLI subcommands
@@ -39,7 +40,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame, Terminal,
 };
 
@@ -87,6 +88,17 @@ enum Mode {
     Input,
 }
 
+/// Active overlay shown on top of the quad pane (dispatch-bgz.5).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Overlay {
+    None,
+    Help,
+    TaskList,
+    ConfirmQuit,
+    ConfirmTerminate,
+    DispatchSlot, // for 'N' -- dispatch into specific slot
+}
+
 #[derive(Clone, Copy)]
 #[allow(dead_code)] // Connected variant used when WebSocket is wired up (dispatch-bgz.7)
 enum RadioState {
@@ -117,6 +129,10 @@ struct App {
     psk_expanded: bool,
     active_count: usize,
     max_agents: usize,
+    /// Active overlay (dispatch-bgz.5).
+    overlay: Overlay,
+    /// Input buffer for the 'N' dispatch-into-slot prompt (dispatch-bgz.5).
+    input_buf: String,
 }
 
 impl App {
@@ -141,6 +157,8 @@ impl App {
             psk_expanded: false,
             active_count: 1,
             max_agents,
+            overlay: Overlay::None,
+            input_buf: String::new(),
         }
     }
 
@@ -520,7 +538,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(Color::White),
                 ),
                 Span::styled(
-                    "i/Enter input │ 1-4 select │ p psk │ q quit",
+                    "i/Enter input │ 1-4 slot │ Tab cycle │ ]/[ page │ n/N dispatch │ x term │ t tasks │ p psk │ q quit │ ? help",
                     Style::default().fg(Color::DarkGray),
                 ),
             ])
@@ -540,6 +558,166 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     };
 
     f.render_widget(Paragraph::new(content), area);
+}
+
+// ── overlay rendering (dispatch-bgz.5) ───────────────────────────────────────
+
+/// Return a centered rect with the given absolute width and height.
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect {
+        x,
+        y,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
+}
+
+fn render_help_overlay(f: &mut Frame, area: Rect) {
+    let r = centered_rect(52, 22, area);
+    f.render_widget(Clear, r);
+    let lines = vec![
+        Line::from(Span::styled(
+            " COMMAND MODE KEYS ",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from(Span::raw("  Enter / i    Enter input mode")),
+        Line::from(Span::raw("  1-4          Select slot on current page")),
+        Line::from(Span::raw("  Tab          Next slot (all pages)")),
+        Line::from(Span::raw("  Shift+Tab    Prev slot (all pages)")),
+        Line::from(Span::raw("  ] / Shift+→  Next page")),
+        Line::from(Span::raw("  [ / Shift+←  Prev page")),
+        Line::from(Span::raw("  n            Dispatch into first empty slot")),
+        Line::from(Span::raw("  N            Dispatch into specific slot")),
+        Line::from(Span::raw("  x            Terminate target agent")),
+        Line::from(Span::raw("  R            Rename target agent")),
+        Line::from(Span::raw("  t            Task list overlay")),
+        Line::from(Span::raw("  p            Toggle PSK visibility")),
+        Line::from(Span::raw("  q            Quit (confirms if agents running)")),
+        Line::from(Span::raw("  ?            This help screen")),
+        Line::default(),
+        Line::from(Span::styled(
+            "  INPUT MODE",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::raw("  Esc          Return to command mode")),
+        Line::from(Span::raw("  Esc Esc      Send literal Escape to PTY")),
+        Line::default(),
+        Line::from(Span::styled(
+            "  Press any key to close",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    let block = Block::default()
+        .title(" HELP ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).block(block),
+        r,
+    );
+}
+
+fn render_task_list_overlay(f: &mut Frame, area: Rect, app: &App) {
+    let r = centered_rect(54, 14, area);
+    f.render_widget(Clear, r);
+    let mut lines = vec![Line::default()];
+    for (i, slot) in app.slots.iter().enumerate() {
+        let slot_num = app.slot_number(i);
+        match slot {
+            None => lines.push(Line::from(Span::styled(
+                format!("  [{}]  -- empty --", slot_num),
+                Style::default().fg(Color::DarkGray),
+            ))),
+            Some(a) => {
+                let task = a.task_id.as_deref().unwrap_or("no task");
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  [{}]  {}", slot_num, a.callsign),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {}", task),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]));
+            }
+        }
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "  Press any key to close",
+        Style::default().fg(Color::DarkGray),
+    )));
+    let block = Block::default()
+        .title(" TASK LIST ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).block(block),
+        r,
+    );
+}
+
+fn render_confirm_overlay(f: &mut Frame, area: Rect, title: &str, body: &str) {
+    let r = centered_rect(50, 7, area);
+    f.render_widget(Clear, r);
+    let lines = vec![
+        Line::default(),
+        Line::from(Span::styled(
+            format!("  {}", body),
+            Style::default().fg(Color::White),
+        )),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("  y ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled("confirm    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("n / Esc ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled("cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::default(),
+    ];
+    let block = Block::default()
+        .title(format!(" {} ", title))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).block(block),
+        r,
+    );
+}
+
+fn render_dispatch_overlay(f: &mut Frame, area: Rect, app: &App) {
+    let r = centered_rect(50, 7, area);
+    f.render_widget(Clear, r);
+    let total_slots = app.total_pages * 4;
+    let lines = vec![
+        Line::default(),
+        Line::from(Span::styled(
+            format!("  Slot number (1-{}):", total_slots),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!("  > {}_", app.input_buf),
+            Style::default().fg(Color::Green),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            "  Enter confirm    Esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::default(),
+    ];
+    let block = Block::default()
+        .title(" DISPATCH INTO SLOT ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).block(block),
+        r,
+    );
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -680,6 +858,32 @@ fn main() -> io::Result<()> {
             render_header(f, chunks[0], &app);
             render_panes(f, chunks[1], &app, vt_lines.clone());
             render_footer(f, chunks[2], &app);
+
+            // Overlays rendered on top of everything (dispatch-bgz.5)
+            match app.overlay {
+                Overlay::None => {}
+                Overlay::Help => render_help_overlay(f, full),
+                Overlay::TaskList => render_task_list_overlay(f, full, &app),
+                Overlay::ConfirmQuit => render_confirm_overlay(
+                    f,
+                    full,
+                    "QUIT",
+                    "Agents are running. Really quit?",
+                ),
+                Overlay::ConfirmTerminate => {
+                    let callsign = match &app.slots[app.target] {
+                        Some(a) => a.callsign.clone(),
+                        None => format!("slot {}", app.target + 1),
+                    };
+                    render_confirm_overlay(
+                        f,
+                        full,
+                        "TERMINATE",
+                        &format!("Terminate {}?", callsign),
+                    );
+                }
+                Overlay::DispatchSlot => render_dispatch_overlay(f, full, &app),
+            }
         })?;
 
         if event::poll(Duration::from_millis(16))? {
@@ -726,31 +930,208 @@ fn main() -> io::Result<()> {
                     // ----------------------------------------------------------------
                     // Command mode: keystrokes control the console.
                     // ----------------------------------------------------------------
-                    Mode::Command => match key.code {
-                        KeyCode::Char('q') => {
-                            agent_terminated = true;
-                            break;
+                    Mode::Command => {
+                        // If an overlay is active, route keys to the overlay handler.
+                        if app.overlay != Overlay::None {
+                            match app.overlay {
+                                Overlay::Help | Overlay::TaskList => {
+                                    // Any key dismisses these overlays.
+                                    app.overlay = Overlay::None;
+                                }
+                                Overlay::ConfirmQuit => match key.code {
+                                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                        agent_terminated = true;
+                                        break;
+                                    }
+                                    _ => {
+                                        app.overlay = Overlay::None;
+                                    }
+                                },
+                                Overlay::ConfirmTerminate => match key.code {
+                                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                        // Terminate the targeted slot.
+                                        app.slots[app.target] = None;
+                                        if app.active_count > 0 {
+                                            app.active_count -= 1;
+                                        }
+                                        app.overlay = Overlay::None;
+                                    }
+                                    _ => {
+                                        app.overlay = Overlay::None;
+                                    }
+                                },
+                                Overlay::DispatchSlot => match key.code {
+                                    KeyCode::Esc => {
+                                        app.input_buf.clear();
+                                        app.overlay = Overlay::None;
+                                    }
+                                    KeyCode::Backspace => {
+                                        app.input_buf.pop();
+                                    }
+                                    KeyCode::Enter => {
+                                        if let Ok(n) = app.input_buf.trim().parse::<usize>() {
+                                            let total = app.total_pages * 4;
+                                            if n >= 1 && n <= total {
+                                                let page = (n - 1) / 4;
+                                                let idx = (n - 1) % 4;
+                                                // Switch to the page and target slot
+                                                app.current_page = page;
+                                                app.target = idx;
+                                                // Dispatch: fill slot if empty
+                                                if app.slots[idx].is_none() {
+                                                    let callsign = NATO
+                                                        .get((page * 4 + idx) % NATO.len())
+                                                        .unwrap_or(&"AGENT");
+                                                    let wall = Local::now().format("%H:%M").to_string();
+                                                    app.slots[idx] = Some(AgentSlot {
+                                                        callsign: callsign.to_string(),
+                                                        tool: "claude-code".to_string(),
+                                                        task_id: None,
+                                                        dispatch_time: Instant::now(),
+                                                        dispatch_wall_str: wall,
+                                                    });
+                                                    app.active_count += 1;
+                                                }
+                                            }
+                                        }
+                                        app.input_buf.clear();
+                                        app.overlay = Overlay::None;
+                                    }
+                                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                                        app.input_buf.push(c);
+                                    }
+                                    _ => {}
+                                },
+                                Overlay::None => unreachable!(),
+                            }
+                        } else {
+                            match key.code {
+                                // Quit — confirm if any agents are running
+                                KeyCode::Char('q') => {
+                                    if app.active_count > 0 {
+                                        app.overlay = Overlay::ConfirmQuit;
+                                    } else {
+                                        break;
+                                    }
+                                }
+
+                                // Enter input mode
+                                KeyCode::Enter | KeyCode::Char('i') => {
+                                    app.mode = Mode::Input;
+                                    app.last_was_escape = false;
+                                }
+
+                                // Select target slot (1-4 on current page)
+                                KeyCode::Char('1') => app.target = 0,
+                                KeyCode::Char('2') => app.target = 1,
+                                KeyCode::Char('3') => app.target = 2,
+                                KeyCode::Char('4') => app.target = 3,
+
+                                // Cycle target: Tab = next slot across all pages
+                                KeyCode::Tab => {
+                                    let total = app.total_pages * 4;
+                                    let global = app.current_page * 4 + app.target;
+                                    let next = (global + 1) % total;
+                                    app.current_page = next / 4;
+                                    app.target = next % 4;
+                                }
+
+                                // Cycle target: Shift+Tab = prev slot across all pages
+                                KeyCode::BackTab => {
+                                    let total = app.total_pages * 4;
+                                    let global = app.current_page * 4 + app.target;
+                                    let prev = (global + total - 1) % total;
+                                    app.current_page = prev / 4;
+                                    app.target = prev % 4;
+                                }
+
+                                // Page navigation: ] or Shift+Right
+                                KeyCode::Char(']') => {
+                                    if app.current_page + 1 < app.total_pages {
+                                        app.current_page += 1;
+                                    }
+                                }
+                                KeyCode::Right
+                                    if key.modifiers.contains(KeyModifiers::SHIFT) =>
+                                {
+                                    if app.current_page + 1 < app.total_pages {
+                                        app.current_page += 1;
+                                    }
+                                }
+
+                                // Page navigation: [ or Shift+Left
+                                KeyCode::Char('[') => {
+                                    if app.current_page > 0 {
+                                        app.current_page -= 1;
+                                    }
+                                }
+                                KeyCode::Left
+                                    if key.modifiers.contains(KeyModifiers::SHIFT) =>
+                                {
+                                    if app.current_page > 0 {
+                                        app.current_page -= 1;
+                                    }
+                                }
+
+                                // Dispatch into first empty slot
+                                KeyCode::Char('n') => {
+                                    if let Some(idx) =
+                                        app.slots.iter().position(|s| s.is_none())
+                                    {
+                                        let global = app.current_page * 4 + idx;
+                                        let callsign = NATO
+                                            .get(global % NATO.len())
+                                            .unwrap_or(&"AGENT");
+                                        let wall = Local::now().format("%H:%M").to_string();
+                                        app.slots[idx] = Some(AgentSlot {
+                                            callsign: callsign.to_string(),
+                                            tool: "claude-code".to_string(),
+                                            task_id: None,
+                                            dispatch_time: Instant::now(),
+                                            dispatch_wall_str: wall,
+                                        });
+                                        app.active_count += 1;
+                                        app.target = idx;
+                                    }
+                                }
+
+                                // Dispatch into specific slot (shows prompt)
+                                KeyCode::Char('N') => {
+                                    app.input_buf.clear();
+                                    app.overlay = Overlay::DispatchSlot;
+                                }
+
+                                // Terminate target agent (confirm first)
+                                KeyCode::Char('x') => {
+                                    if app.slots[app.target].is_some() {
+                                        app.overlay = Overlay::ConfirmTerminate;
+                                    }
+                                }
+
+                                // Rename target agent (stub — opens input mode for now)
+                                KeyCode::Char('R') => {
+                                    // Stub: rename not yet implemented
+                                }
+
+                                // Task list overlay
+                                KeyCode::Char('t') => {
+                                    app.overlay = Overlay::TaskList;
+                                }
+
+                                // Toggle PSK expansion
+                                KeyCode::Char('p') => {
+                                    app.psk_expanded = !app.psk_expanded;
+                                }
+
+                                // Help overlay
+                                KeyCode::Char('?') => {
+                                    app.overlay = Overlay::Help;
+                                }
+
+                                _ => {}
+                            }
                         }
-
-                        // Enter input mode
-                        KeyCode::Enter | KeyCode::Char('i') => {
-                            app.mode = Mode::Input;
-                            app.last_was_escape = false;
-                        }
-
-                        // Select target slot (1-4 on current page)
-                        KeyCode::Char('1') => app.target = 0,
-                        KeyCode::Char('2') => app.target = 1,
-                        KeyCode::Char('3') => app.target = 2,
-                        KeyCode::Char('4') => app.target = 3,
-
-                        // Toggle PSK expansion
-                        KeyCode::Char('p') => {
-                            app.psk_expanded = !app.psk_expanded;
-                        }
-
-                        _ => {}
-                    },
+                    }
                 }
             }
         }
