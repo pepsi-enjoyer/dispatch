@@ -39,4 +39,5 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.gson)
     testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.junit)
 }

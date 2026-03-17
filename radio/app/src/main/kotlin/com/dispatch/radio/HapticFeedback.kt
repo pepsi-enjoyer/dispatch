@@ -7,8 +7,13 @@ import android.os.Vibrator
 import android.os.VibratorManager
 
 /**
- * Haptic feedback patterns for radio events.
- * Detailed patterns are implemented in dispatch-88k.8.
+ * Haptic feedback patterns for radio events (dispatch-88k.8).
+ *
+ * Patterns:
+ *   shortPulse     - PTT start / target change (50ms)
+ *   confirmPulse   - PTT release (send confirm) (100ms)
+ *   doublePulse    - empty transcript (2x 60ms)
+ *   dispatchPulse  - agent dispatched (long-short: 120ms + 60ms)
  */
 class HapticFeedback(context: Context) {
 
@@ -42,6 +47,12 @@ class HapticFeedback(context: Context) {
     fun doublePulse() {
         if (!enabled) return
         vibratePattern(longArrayOf(0, 60, 80, 60))
+    }
+
+    /** Dispatch confirm — used when a new agent is dispatched (long-short pattern). */
+    fun dispatchPulse() {
+        if (!enabled) return
+        vibratePattern(longArrayOf(0, 120, 60, 60))
     }
 
     private fun vibrate(ms: Long) {

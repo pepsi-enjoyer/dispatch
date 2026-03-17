@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/background"
+    android:padding="24dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="DISPATCH RADIO"
+            android:textColor="@color/cyan"
+            android:textSize="20sp"
+            android:fontFamily="monospace"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="SETTINGS"
+            android:textColor="@color/white"
+            android:textSize="14sp"
+            android:fontFamily="monospace"
+            android:layout_marginBottom="32dp" />
+
+        <!-- Console Address -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="CONSOLE ADDRESS"
+            android:textColor="@color/dim_grey"
+            android:textSize="11sp"
+            android:fontFamily="monospace"
+            android:layout_marginBottom="4dp" />
+
+        <EditText
+            android:id="@+id/et_host"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="192.168.1.1"
+            android:inputType="textUri"
+            android:textColor="@color/white"
+            android:textColorHint="@color/dim_grey"
+            android:background="@drawable/input_background"
+            android:fontFamily="monospace"
+            android:padding="12dp"
+            android:layout_marginBottom="12dp" />
+
+        <!-- Port -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="PORT"
+            android:textColor="@color/dim_grey"
+            android:textSize="11sp"
+            android:fontFamily="monospace"
+            android:layout_marginBottom="4dp" />
+
+        <EditText
+            android:id="@+id/et_port"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="9800"
+            android:inputType="number"
+            android:textColor="@color/white"
+            android:textColorHint="@color/dim_grey"
+            android:background="@drawable/input_background"
+            android:fontFamily="monospace"
+            android:padding="12dp"
+            android:layout_marginBottom="24dp" />
+
+        <!-- Pre-Shared Key -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="PRE-SHARED KEY"
+            android:textColor="@color/dim_grey"
+            android:textSize="11sp"
+            android:fontFamily="monospace"
+            android:layout_marginBottom="4dp" />
+
+        <EditText
+            android:id="@+id/et_psk"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="enter key from console"
+            android:inputType="textPassword"
+            android:textColor="@color/white"
+            android:textColorHint="@color/dim_grey"
+            android:background="@drawable/input_background"
+            android:fontFamily="monospace"
+            android:padding="12dp"
+            android:layout_marginBottom="24dp" />
+
+        <!-- Speech Locale -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="SPEECH RECOGNITION LOCALE"
+            android:textColor="@color/dim_grey"
+            android:textSize="11sp"
+            android:fontFamily="monospace"
+            android:layout_marginBottom="4dp" />
+
+        <EditText
+            android:id="@+id/et_locale"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="en-AU"
+            android:inputType="text"
+            android:textColor="@color/white"
+            android:textColorHint="@color/dim_grey"
+            android:background="@drawable/input_background"
+            android:fontFamily="monospace"
+            android:padding="12dp"
+            android:layout_marginBottom="24dp" />
+
+        <!-- Toggles -->
+        <CheckBox
+            android:id="@+id/cb_haptic"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="HAPTIC FEEDBACK"
+            android:textColor="@color/white"
+            android:fontFamily="monospace"
+            android:buttonTint="@color/cyan"
+            android:layout_marginBottom="12dp" />
+
+        <CheckBox
+            android:id="@+id/cb_confirm"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="CONFIRM BEFORE SEND"
+            android:textColor="@color/white"
+            android:fontFamily="monospace"
+            android:buttonTint="@color/cyan"
+            android:layout_marginBottom="12dp" />
+
+        <CheckBox
+            android:id="@+id/cb_screen_on"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="KEEP SCREEN ON"
+            android:textColor="@color/white"
+            android:fontFamily="monospace"
+            android:buttonTint="@color/cyan"
+            android:layout_marginBottom="32dp" />
+
+        <Button
+            android:id="@+id/btn_save"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="SAVE"
+            android:textColor="@color/background"
+            android:backgroundTint="@color/cyan"
+            android:fontFamily="monospace"
+            android:textSize="14sp" />
+
+    </LinearLayout>
+
+</ScrollView>
