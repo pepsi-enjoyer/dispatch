@@ -4,6 +4,7 @@
 // dispatch-e0k.1: PTY with claude via portable-pty + vt100 + ratatui
 // dispatch-e0k.2: keyboard input forwarding to PTY
 // dispatch-e0k.3: bd create integration from Rust
+// dispatch-bgz.4: modal input model (command mode / input mode)
 
 use std::{
     io::{self, Read, Write},
@@ -30,6 +31,18 @@ use ratatui::{
 
 const PTY_ROWS: u16 = 24;
 const PTY_COLS: u16 = 80;
+
+/// Input mode for the console (dispatch-bgz.4).
+///
+/// - `Command`: default mode; keystrokes control the console (navigation, quit, etc.).
+/// - `Input`: keystrokes are forwarded directly to the active PTY.
+///   The only key the console intercepts in this mode is Escape.
+///   A double-Escape sends one literal Escape byte to the PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputMode {
+    Command,
+    Input,
+}
 
 /// Run `bd create "{prompt}" --json` and return the task ID if successful.
 fn bd_create_task(prompt: &str) -> Option<String> {
@@ -221,7 +234,12 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let title = format!("DISPATCH PoC{task_label}  |  Ctrl+Q to quit");
+    let title_base = format!("DISPATCH PoC{task_label}");
+
+    // Modal input state (dispatch-bgz.4)
+    let mut mode = InputMode::Command;
+    // Track whether the previous key in Input mode was an Escape (for double-Escape passthrough).
+    let mut last_was_escape = false;
 
     loop {
         // Render
@@ -230,6 +248,22 @@ fn main() -> io::Result<()> {
             let vt_screen = parser.screen();
             let lines = screen_to_lines(vt_screen);
             let text = Text::from(lines);
+
+            // Mode indicator and help text vary by mode.
+            let (mode_label, help_text, border_color) = match mode {
+                InputMode::Command => (
+                    " [COMMAND]",
+                    " Enter/i: input mode  |  Ctrl+Q: quit",
+                    Color::Green,
+                ),
+                InputMode::Input => (
+                    " [INPUT]",
+                    " Esc: command mode  |  Esc Esc: send Esc to PTY",
+                    Color::Yellow,
+                ),
+            };
+
+            let title = format!("{title_base}{mode_label}");
 
             terminal.draw(|frame| {
                 let chunks = Layout::default()
@@ -241,37 +275,87 @@ fn main() -> io::Result<()> {
                     .title(Span::styled(
                         title.as_str(),
                         Style::default()
-                            .fg(Color::Green)
+                            .fg(border_color)
                             .add_modifier(Modifier::BOLD),
                     ))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Green));
+                    .border_style(Style::default().fg(border_color));
 
                 let inner = block.inner(chunks[0]);
                 frame.render_widget(block, chunks[0]);
                 frame.render_widget(Paragraph::new(text), inner);
 
                 let help = Span::styled(
-                    " Ctrl+Q quit",
+                    help_text,
                     Style::default().fg(Color::DarkGray),
                 );
                 frame.render_widget(Paragraph::new(Line::from(help)), chunks[1]);
             })?;
         }
 
-        // Poll for input (dispatch-e0k.2)
+        // Poll for input
         if event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
-                // Quit on Ctrl+Q
-                if key.code == KeyCode::Char('q')
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
-                    break;
-                }
-                let bytes = key_to_pty_bytes(&key);
-                if !bytes.is_empty() {
-                    let _ = pty_writer.write_all(&bytes);
-                    let _ = pty_writer.flush();
+                match mode {
+                    // ----------------------------------------------------------------
+                    // Command mode: keystrokes control the console.
+                    // ----------------------------------------------------------------
+                    InputMode::Command => {
+                        // Quit on Ctrl+Q (always available in command mode).
+                        if key.code == KeyCode::Char('q')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            break;
+                        }
+
+                        // Enter or 'i' transitions to Input mode.
+                        if key.code == KeyCode::Enter
+                            || (key.code == KeyCode::Char('i')
+                                && key.modifiers.is_empty())
+                        {
+                            mode = InputMode::Input;
+                            last_was_escape = false;
+                            continue;
+                        }
+
+                        // TODO: additional command-mode bindings (pane navigation, etc.)
+                        // will be added as part of the quad-pane layout epic.
+                    }
+
+                    // ----------------------------------------------------------------
+                    // Input mode: keystrokes go to the PTY.
+                    // Escape is the only key the console intercepts here.
+                    // Double-Escape passes one literal Escape byte to the PTY.
+                    // Radio voice commands are handled at a higher layer (always active).
+                    // ----------------------------------------------------------------
+                    InputMode::Input => {
+                        if key.code == KeyCode::Esc {
+                            if last_was_escape {
+                                // Double-Escape: send one literal Escape to PTY, stay in Input mode.
+                                let _ = pty_writer.write_all(b"\x1b");
+                                let _ = pty_writer.flush();
+                                last_was_escape = false;
+                            } else {
+                                // First Escape: wait to see if a second Escape follows.
+                                last_was_escape = true;
+                            }
+                            continue;
+                        }
+
+                        if last_was_escape {
+                            // Single Escape was pressed before this non-Escape key:
+                            // switch to command mode and discard the current key.
+                            mode = InputMode::Command;
+                            last_was_escape = false;
+                            continue;
+                        }
+
+                        let bytes = key_to_pty_bytes(&key);
+                        if !bytes.is_empty() {
+                            let _ = pty_writer.write_all(&bytes);
+                            let _ = pty_writer.flush();
+                        }
+                    }
                 }
             }
         }
