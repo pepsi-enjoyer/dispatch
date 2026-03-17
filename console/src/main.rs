@@ -4,6 +4,7 @@
 // dispatch-e0k.2: keyboard input forwarding to PTY
 // dispatch-e0k.3: bd create integration from Rust
 // dispatch-bgz.4: modal input model (command mode / input mode)
+// dispatch-bgz.9: beads task lifecycle (create, assign, close, reopen)
 // dispatch-bgz.12: config file and CLI subcommands
 
 mod config;
@@ -12,7 +13,10 @@ use clap::{Parser, Subcommand};
 use std::{
     io::{self, Read, Write},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::Duration,
 };
@@ -64,10 +68,10 @@ enum InputMode {
     Input,
 }
 
-/// Run `bd create "{prompt}" --json` and return the task ID if successful.
+/// Run `bd create "{prompt}" -t task --json` and return the task ID.
 fn bd_create_task(prompt: &str) -> Option<String> {
     let output = Command::new("bd")
-        .args(["create", prompt, "--json"])
+        .args(["create", prompt, "-t", "task", "--json"])
         .output()
         .ok()?;
 
@@ -79,6 +83,42 @@ fn bd_create_task(prompt: &str) -> Option<String> {
     // bd returns a JSON array; extract the first id field
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
     v.get(0)?.get("id")?.as_str().map(|s| s.to_owned())
+}
+
+/// Run `bd update {id} --claim --assignee {callsign} --status in_progress --json`.
+fn bd_assign_task(id: &str, callsign: &str) -> bool {
+    Command::new("bd")
+        .args([
+            "update",
+            id,
+            "--claim",
+            "--assignee",
+            callsign,
+            "--status",
+            "in_progress",
+            "--json",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run `bd close {id} --reason "Completed" --json`.
+fn bd_close_task(id: &str) -> bool {
+    Command::new("bd")
+        .args(["close", id, "--reason", "Completed", "--json"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run `bd update {id} --status open --json` to reopen an abandoned task.
+fn bd_reopen_task(id: &str) -> bool {
+    Command::new("bd")
+        .args(["update", id, "--status", "open", "--json"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Map a crossterm KeyEvent to the bytes that should be sent to the PTY.
@@ -216,8 +256,20 @@ fn main() -> io::Result<()> {
     let cfg = config::load_or_create();
     let psk_short: String = cfg.auth.psk.chars().take(8).collect();
 
-    // Phase 3 (dispatch-e0k.3): create a bd task before starting the PTY
-    let task_id = bd_create_task("PoC session: validate PTY + vt100 + ratatui");
+    // dispatch-bgz.9: beads task lifecycle
+    // Slot 1 callsign is Alpha by convention (NATO phonetic alphabet, dispatch order)
+    const CALLSIGN: &str = "Alpha";
+    const PROMPT: &str = "PoC session: validate PTY + vt100 + ratatui";
+
+    // 1. Create a typed task
+    let task_id = bd_create_task(PROMPT);
+
+    // 2. Assign the task to this agent slot
+    if let Some(id) = &task_id {
+        bd_assign_task(id, CALLSIGN);
+    }
+
+    // Info strip: callsign, task ID, PSK prefix
     let task_label = match &task_id {
         Some(id) => format!(" | task: {id}"),
         None => " | bd: unavailable".to_string(),
@@ -246,7 +298,7 @@ fn main() -> io::Result<()> {
         })
         .expect("failed to spawn process");
 
-    // PTY reader thread: feed bytes into vt100 parser
+    // PTY reader thread: feed bytes into vt100 parser; signal when PTY closes
     let screen: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(vt100::Parser::new(
         PTY_ROWS,
         PTY_COLS,
@@ -254,6 +306,8 @@ fn main() -> io::Result<()> {
     )));
     let screen_writer = Arc::clone(&screen);
     let mut pty_reader = pair.master.try_clone_reader().expect("clone reader");
+    let child_exited = Arc::new(AtomicBool::new(false));
+    let child_exited_writer = Arc::clone(&child_exited);
 
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -266,10 +320,19 @@ fn main() -> io::Result<()> {
                 }
             }
         }
+        child_exited_writer.store(true, Ordering::Relaxed);
     });
 
     // PTY writer (dispatch-e0k.2): keyboard input forwarding
     let mut pty_writer = pair.master.take_writer().expect("take writer");
+
+    // 3. Deliver prefixed prompt to the agent
+    // Format: "[Dispatch task {id}] {prompt_text}\r"
+    if let Some(id) = &task_id {
+        let prefixed = format!("[Dispatch task {id}] {PROMPT}\r");
+        let _ = pty_writer.write_all(prefixed.as_bytes());
+        let _ = pty_writer.flush();
+    }
 
     // Set up ratatui terminal
     enable_raw_mode()?;
@@ -278,14 +341,23 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let title_base = format!("DISPATCH{task_label}  |  psk: {psk_short}...");
+    // 4. Pane info strip: callsign, task ID, PSK prefix
+    let title_base = format!("DISPATCH | {CALLSIGN}{task_label}  |  psk: {psk_short}...");
 
     // Modal input state (dispatch-bgz.4)
     let mut mode = InputMode::Command;
     // Track whether the previous key in Input mode was an Escape (for double-Escape passthrough).
     let mut last_was_escape = false;
 
+    // Track exit reason to determine task close vs reopen (dispatch-bgz.9)
+    let mut agent_terminated = false;
+
     loop {
+        // Break if the child process exited (agent completed its work)
+        if child_exited.load(Ordering::Relaxed) {
+            break;
+        }
+
         // Render
         {
             let parser = screen.lock().unwrap();
@@ -349,6 +421,7 @@ fn main() -> io::Result<()> {
                         if key.code == KeyCode::Char('q')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
+                            agent_terminated = true;
                             break;
                         }
 
@@ -410,8 +483,17 @@ fn main() -> io::Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
+    // 5. Task lifecycle close/reopen based on exit reason (dispatch-bgz.9)
     if let Some(id) = &task_id {
-        println!("PoC session ended. Beads task: {id}");
+        if agent_terminated {
+            // Agent was killed by user — reopen task so another agent can pick it up
+            bd_reopen_task(id);
+            println!("Agent terminated. Task {id} reopened as open.");
+        } else {
+            // Agent's PTY closed naturally — mark task complete
+            bd_close_task(id);
+            println!("Session complete. Task {id} closed.");
+        }
     }
 
     Ok(())
