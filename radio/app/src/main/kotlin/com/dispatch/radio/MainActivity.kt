@@ -80,7 +80,7 @@ class MainActivity : AppCompatActivity() {
             context = this,
             locale = settings.speechLocale,
             onListeningStart = {
-                haptics.shortPulse()
+                haptics.listeningStart()
                 wsClient.send("""{"type":"radio_status","state":"listening"}""")
                 flListening.visibility = View.VISIBLE
                 tvPartial.text = ""
@@ -90,13 +90,13 @@ class MainActivity : AppCompatActivity() {
             },
             onFinalResult = { transcript ->
                 flListening.visibility = View.INVISIBLE
-                haptics.confirmPulse()
+                haptics.sendConfirm()
                 wsClient.send("""{"type":"radio_status","state":"idle"}""")
                 handleTranscript(transcript)
             },
             onEmptyTranscript = {
                 flListening.visibility = View.INVISIBLE
-                haptics.doublePulse()
+                haptics.emptyTranscript()
                 wsClient.send("""{"type":"radio_status","state":"idle"}""")
             },
             onError = {
@@ -172,7 +172,7 @@ class MainActivity : AppCompatActivity() {
         val command = CommandParser.parse(transcript, agents)
         val msg = when (command) {
             is Command.Dispatch -> {
-                haptics.dispatchPulse()
+                haptics.dispatchConfirm()
                 showLastDispatch("DISPATCH ${command.tool.uppercase()}", null)
                 """{"type":"dispatch","tool":"${command.tool}"}"""
             }
@@ -233,7 +233,7 @@ class MainActivity : AppCompatActivity() {
                 tvLastTaskId.text = if (taskId != null) "task $taskId" else ""
             }
             "dispatched" -> {
-                haptics.dispatchPulse()
+                haptics.dispatchConfirm()
             }
         }
     }
@@ -310,7 +310,7 @@ class MainActivity : AppCompatActivity() {
                 context = this,
                 locale = settings.speechLocale,
                 onListeningStart = {
-                    haptics.shortPulse()
+                    haptics.listeningStart()
                     wsClient.send("""{"type":"radio_status","state":"listening"}""")
                     flListening.visibility = View.VISIBLE
                     tvPartial.text = ""
@@ -318,13 +318,13 @@ class MainActivity : AppCompatActivity() {
                 onPartialResult = { partial -> tvPartial.text = partial },
                 onFinalResult = { transcript ->
                     flListening.visibility = View.INVISIBLE
-                    haptics.confirmPulse()
+                    haptics.sendConfirm()
                     wsClient.send("""{"type":"radio_status","state":"idle"}""")
                     handleTranscript(transcript)
                 },
                 onEmptyTranscript = {
                     flListening.visibility = View.INVISIBLE
-                    haptics.doublePulse()
+                    haptics.emptyTranscript()
                     wsClient.send("""{"type":"radio_status","state":"idle"}""")
                 },
                 onError = {

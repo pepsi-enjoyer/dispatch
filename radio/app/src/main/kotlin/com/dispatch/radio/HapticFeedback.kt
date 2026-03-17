@@ -7,69 +7,84 @@ import android.os.Vibrator
 import android.os.VibratorManager
 
 /**
- * Haptic feedback patterns for radio events (dispatch-88k.8).
+ * Haptic feedback for Dispatch Radio events.
  *
- * Patterns:
- *   shortPulse     - PTT start / target change (50ms)
- *   confirmPulse   - PTT release (send confirm) (100ms)
- *   doublePulse    - empty transcript (2x 60ms)
- *   dispatchPulse  - agent dispatched (long-short: 120ms + 60ms)
+ * Distinct vibration patterns for each interaction type:
+ *  - [listeningStart]  : single short pulse (40 ms) — PTT key down
+ *  - [sendConfirm]     : single firm pulse (80 ms) — PTT key up, transcript sent
+ *  - [emptyTranscript] : double-pulse (30+30 ms) — PTT key up, nothing recorded
+ *  - [targetChange]    : crisp tick (20 ms) — volume-up target cycle
+ *  - [dispatchConfirm] : ascending triple-pulse — new agent dispatched
+ *
+ * Set [enabled] = false (or call [setEnabled]) to silence all patterns.
+ * Defaults to enabled; wire to [RadioSettings.hapticEnabled] on startup.
  */
 class HapticFeedback(context: Context) {
 
-    private val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager)
-            .defaultVibrator
-    } else {
-        @Suppress("DEPRECATION")
-        context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-    }
-
-    private var enabled = true
+    var enabled: Boolean = true
 
     fun setEnabled(enabled: Boolean) {
         this.enabled = enabled
     }
 
-    /** Short single pulse — used on target change. */
-    fun shortPulse() {
+    private val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+        manager.defaultVibrator
+    } else {
+        @Suppress("DEPRECATION")
+        context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+    }
+
+    /** Single short pulse (40 ms). PTT key down — listening starts. */
+    fun listeningStart() = vibrate(PATTERN_LISTENING)
+
+    /** Single firm pulse (80 ms). PTT key up — transcript parsed and sent. */
+    fun sendConfirm() = vibrate(PATTERN_CONFIRM)
+
+    /** Double-pulse (30 + 30 ms). PTT key up — transcript was empty, nothing sent. */
+    fun emptyTranscript() = vibrate(PATTERN_DOUBLE)
+
+    /** Crisp tick (20 ms). Volume Up short press — target cycled to next agent. */
+    fun targetChange() = vibrate(PATTERN_TICK)
+
+    /** Ascending triple-pulse. Confirms a new agent was dispatched. */
+    fun dispatchConfirm() = vibrate(PATTERN_DISPATCH)
+
+    // --- Compatibility aliases for callers using the generic method names ---
+
+    /** Alias: calls [targetChange]. Used by [VolumeUpHandler]. */
+    fun shortPulse() = targetChange()
+
+    /** Alias: calls [sendConfirm]. */
+    fun confirmPulse() = sendConfirm()
+
+    /** Alias: calls [emptyTranscript]. */
+    fun doublePulse() = emptyTranscript()
+
+    /** Alias: calls [dispatchConfirm]. */
+    fun dispatchPulse() = dispatchConfirm()
+
+    private fun vibrate(pattern: LongArray) {
         if (!enabled) return
-        vibrate(50)
+        vibrator.vibrate(VibrationEffect.createWaveform(pattern, NO_REPEAT))
     }
 
-    /** Confirm pulse — used after send. */
-    fun confirmPulse() {
-        if (!enabled) return
-        vibrate(100)
-    }
+    companion object {
+        private const val NO_REPEAT = -1
 
-    /** Double pulse — used on empty transcript. */
-    fun doublePulse() {
-        if (!enabled) return
-        vibratePattern(longArrayOf(0, 60, 80, 60))
-    }
+        // 40 ms — short single pulse (PTT start / listening start)
+        private val PATTERN_LISTENING = longArrayOf(0, 40)
 
-    /** Dispatch confirm — used when a new agent is dispatched (long-short pattern). */
-    fun dispatchPulse() {
-        if (!enabled) return
-        vibratePattern(longArrayOf(0, 120, 60, 60))
-    }
+        // 80 ms — firm single pulse (send confirm)
+        private val PATTERN_CONFIRM = longArrayOf(0, 80)
 
-    private fun vibrate(ms: Long) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
-        } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(ms)
-        }
-    }
+        // 30 ms on · 70 ms off · 30 ms on (empty transcript double-pulse)
+        private val PATTERN_DOUBLE = longArrayOf(0, 30, 70, 30)
 
-    private fun vibratePattern(pattern: LongArray) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
-        } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(pattern, -1)
-        }
+        // 20 ms — crisp tick (target change, shorter/different feel from PTT start)
+        private val PATTERN_TICK = longArrayOf(0, 20)
+
+        // 25 ms · 55 ms off · 35 ms · 55 ms off · 55 ms — ascending triple-pulse (dispatch confirm)
+        private val PATTERN_DISPATCH = longArrayOf(0, 25, 55, 35, 55, 55)
     }
 }
