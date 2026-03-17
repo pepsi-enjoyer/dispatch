@@ -7,6 +7,7 @@
 // dispatch-bgz.5: full command mode keybindings
 // dispatch-bgz.9: beads task lifecycle (create, assign, close, reopen)
 // dispatch-bgz.10: pane info strip and header bar
+// dispatch-bgz.11: standby pane (empty slot display + queued task list)
 // dispatch-bgz.12: config file and CLI subcommands
 //
 // Layout:
@@ -22,7 +23,7 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        mpsc, Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -67,6 +68,7 @@ enum Commands {
 
 const PTY_ROWS: u16 = 20;
 const PTY_COLS: u16 = 80;
+const TASK_POLL_SECS: u64 = 5;
 
 const NATO: &[&str] = &[
     "ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOXTROT", "GOLF", "HOTEL", "INDIA", "JULIET",
@@ -114,6 +116,13 @@ struct AgentSlot {
     dispatch_wall_str: String, // "14:20"
 }
 
+/// A task ready to be dispatched, fetched from `bd ready --json` (dispatch-bgz.11).
+#[derive(Clone)]
+struct QueuedTask {
+    id: String,
+    title: String,
+}
+
 struct App {
     /// Four visible slots for the current page. None = empty.
     slots: [Option<AgentSlot>; 4],
@@ -133,6 +142,8 @@ struct App {
     overlay: Overlay,
     /// Input buffer for the 'N' dispatch-into-slot prompt (dispatch-bgz.5).
     input_buf: String,
+    /// Open/unblocked tasks from beads, displayed in the last standby pane (dispatch-bgz.11).
+    queued_tasks: Vec<QueuedTask>,
 }
 
 impl App {
@@ -159,6 +170,7 @@ impl App {
             max_agents,
             overlay: Overlay::None,
             input_buf: String::new(),
+            queued_tasks: Vec::new(),
         }
     }
 
@@ -172,6 +184,24 @@ impl App {
         } else {
             format!("{}...", &self.psk[..4])
         }
+    }
+
+    /// True if `slot_idx` is the last empty slot on the last page (dispatch-bgz.11).
+    fn is_last_standby(&self, slot_idx: usize) -> bool {
+        if self.slots[slot_idx].is_some() {
+            return false;
+        }
+        // Only applies to the last page
+        if self.current_page != self.total_pages - 1 {
+            return false;
+        }
+        // No later empty slot on this page
+        for i in (slot_idx + 1)..4 {
+            if self.slots[i].is_none() {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -233,6 +263,37 @@ fn bd_reopen_task(id: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Run `bd ready --json` and return open/unblocked tasks for the queue display (dispatch-bgz.11).
+fn bd_fetch_queued() -> Vec<QueuedTask> {
+    let output = match Command::new("bd").args(["ready", "--json"]).output() {
+        Ok(o) => o,
+        Err(_) => return vec![],
+    };
+
+    if !output.status.success() {
+        return vec![];
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = match serde_json::from_str(stdout.trim()) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let arr = match v.as_array() {
+        Some(a) => a,
+        None => return vec![],
+    };
+
+    arr.iter()
+        .filter_map(|item| {
+            let id = item.get("id")?.as_str()?.to_owned();
+            let title = item.get("title")?.as_str()?.to_owned();
+            Some(QueuedTask { id, title })
+        })
+        .collect()
 }
 
 /// Map a crossterm KeyEvent to the bytes that should be sent to the PTY.
@@ -458,6 +519,61 @@ fn pane_info_strip(slot_idx: usize, app: &App) -> Text<'static> {
     }
 }
 
+/// Build the standby body lines for an empty pane (dispatch-bgz.11).
+///
+/// The last standby slot on the last page shows queued tasks; all others show dispatch shortcuts.
+fn standby_body(slot_idx: usize, app: &App) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(""));
+
+    if app.is_last_standby(slot_idx) {
+        // Last standby on the last page: show queued task count and truncated titles
+        lines.push(Line::from(Span::styled(
+            format!(" Queued tasks: {}", app.queued_tasks.len()),
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from(""));
+        for task in app.queued_tasks.iter().take(6) {
+            let title_truncated = if task.title.len() > 24 {
+                format!("{}...", &task.title[..21])
+            } else {
+                task.title.clone()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {}  \"{}\"", task.id, title_truncated),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        if app.queued_tasks.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (none)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    } else {
+        // Regular standby slot: show dispatch shortcuts
+        lines.push(Line::from(Span::styled(
+            " Dispatch new agent:",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  [c] claude-code",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  [g] gh copilot",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    lines
+}
+
 fn render_pane(
     f: &mut Frame,
     area: Rect,
@@ -482,7 +598,7 @@ fn render_pane(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Split inner: 4 lines for info strip, rest for terminal
+    // Split inner: 4 lines for info strip, rest for terminal / standby content
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(0)])
@@ -492,7 +608,12 @@ fn render_pane(
     f.render_widget(Paragraph::new(info), chunks[0]);
 
     if let Some(lines) = vt_lines {
+        // Active pane: show PTY content
         f.render_widget(Paragraph::new(Text::from(lines)), chunks[1]);
+    } else {
+        // Standby pane: show dispatch shortcuts or queued task list (dispatch-bgz.11)
+        let body = standby_body(slot_idx, app);
+        f.render_widget(Paragraph::new(body), chunks[1]);
     }
 }
 
@@ -816,6 +937,14 @@ fn main() -> io::Result<()> {
         let _ = pty_writer.flush();
     }
 
+    // Background thread: periodically fetch queued tasks from beads (dispatch-bgz.11)
+    let (tasks_tx, tasks_rx) = mpsc::channel::<Vec<QueuedTask>>();
+    thread::spawn(move || loop {
+        let tasks = bd_fetch_queued();
+        let _ = tasks_tx.send(tasks);
+        thread::sleep(Duration::from_secs(TASK_POLL_SECS));
+    });
+
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -836,6 +965,11 @@ fn main() -> io::Result<()> {
         // Break if the child process exited (agent completed its work)
         if child_exited.load(Ordering::Relaxed) {
             break;
+        }
+
+        // Pull latest queued tasks from background thread (non-blocking, dispatch-bgz.11)
+        while let Ok(tasks) = tasks_rx.try_recv() {
+            app.queued_tasks = tasks;
         }
 
         // Snapshot VT screen for slot 0 (Alpha's PTY)
