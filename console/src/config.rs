@@ -1,0 +1,164 @@
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, fs, path::PathBuf};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServerConfig {
+    pub port: u16,
+    pub bind: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthConfig {
+    pub psk: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TerminalConfig {
+    pub scrollback_lines: u32,
+    pub max_agents: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BeadsConfig {
+    pub project_dir: String,
+    pub auto_track: bool,
+    pub auto_dispatch: bool,
+    pub default_tool: String,
+    pub completion_timeout_secs: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Config {
+    pub server: ServerConfig,
+    pub auth: AuthConfig,
+    pub terminal: TerminalConfig,
+    pub beads: BeadsConfig,
+    pub tools: HashMap<String, String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        let psk = generate_psk();
+        let mut tools = HashMap::new();
+        tools.insert("claude-code".to_string(), "claude".to_string());
+        tools.insert("copilot".to_string(), "gh copilot suggest".to_string());
+
+        Config {
+            server: ServerConfig {
+                port: 9800,
+                bind: "0.0.0.0".to_string(),
+            },
+            auth: AuthConfig { psk },
+            terminal: TerminalConfig {
+                scrollback_lines: 1000,
+                max_agents: 8,
+            },
+            beads: BeadsConfig {
+                project_dir: ".".to_string(),
+                auto_track: true,
+                auto_dispatch: true,
+                default_tool: "claude-code".to_string(),
+                completion_timeout_secs: 60,
+            },
+            tools,
+        }
+    }
+}
+
+/// Returns the platform-appropriate config file path.
+pub fn config_path() -> PathBuf {
+    let base = dirs::config_dir().expect("cannot determine config directory");
+    base.join("dispatch").join("config.toml")
+}
+
+/// Generates a 24-character hex PSK.
+fn generate_psk() -> String {
+    let bytes: Vec<u8> = (0..12).map(|_| rand::thread_rng().gen()).collect();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Loads config from disk, creating it with defaults if absent.
+pub fn load_or_create() -> Config {
+    let path = config_path();
+
+    if path.exists() {
+        let raw = fs::read_to_string(&path).expect("failed to read config");
+        toml::from_str(&raw).expect("invalid config.toml")
+    } else {
+        let cfg = Config::default();
+        let dir = path.parent().unwrap();
+        fs::create_dir_all(dir).expect("failed to create config directory");
+        let raw = to_toml_with_comments(&cfg);
+        fs::write(&path, &raw).expect("failed to write config");
+        cfg
+    }
+}
+
+/// Overwrites the PSK with a freshly generated one and saves.
+pub fn regenerate_psk() -> String {
+    let path = config_path();
+    let mut cfg = load_or_create();
+    cfg.auth.psk = generate_psk();
+    let raw = to_toml_with_comments(&cfg);
+    fs::write(&path, &raw).expect("failed to write config");
+    cfg.auth.psk
+}
+
+/// Serialises config to TOML with comments matching the SPEC.
+fn to_toml_with_comments(cfg: &Config) -> String {
+    // Build tools table manually for consistent ordering.
+    let mut tools_lines = String::new();
+    // Ensure canonical ordering.
+    for key in ["claude-code", "copilot"] {
+        if let Some(val) = cfg.tools.get(key) {
+            tools_lines.push_str(&format!("{key} = \"{val}\"\n"));
+        }
+    }
+    for (k, v) in &cfg.tools {
+        if k != "claude-code" && k != "copilot" {
+            tools_lines.push_str(&format!("{k} = \"{v}\"\n"));
+        }
+    }
+
+    format!(
+        "[server]\n\
+         port = {port}\n\
+         bind = \"{bind}\"\n\
+         \n\
+         [auth]\n\
+         # Auto-generated. Run `dispatch regenerate-psk` to rotate.\n\
+         psk = \"{psk}\"\n\
+         \n\
+         [terminal]\n\
+         scrollback_lines = {scrollback}\n\
+         # Maximum concurrent agents. 4-26, in multiples of 4 (one page per 4 agents).\n\
+         max_agents = {max_agents}\n\
+         \n\
+         [beads]\n\
+         # Working directory for bd commands. Defaults to cwd.\n\
+         project_dir = \"{project_dir}\"\n\
+         # Auto-create tasks for voice prompts.\n\
+         auto_track = {auto_track}\n\
+         # Auto-dispatch agents for unaddressed prompts.\n\
+         auto_dispatch = {auto_dispatch}\n\
+         # Default tool for auto-dispatched agents.\n\
+         default_tool = \"{default_tool}\"\n\
+         # Inactivity timeout for task completion detection (seconds). 0 to disable.\n\
+         completion_timeout_secs = {completion_timeout_secs}\n\
+         \n\
+         [tools]\n\
+         {tools}",
+        port = cfg.server.port,
+        bind = cfg.server.bind,
+        psk = cfg.auth.psk,
+        scrollback = cfg.terminal.scrollback_lines,
+        max_agents = cfg.terminal.max_agents,
+        project_dir = cfg.beads.project_dir,
+        auto_track = cfg.beads.auto_track,
+        auto_dispatch = cfg.beads.auto_dispatch,
+        default_tool = cfg.beads.default_tool,
+        completion_timeout_secs = cfg.beads.completion_timeout_secs,
+        tools = tools_lines,
+    )
+}
