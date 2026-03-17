@@ -1,11 +1,14 @@
-// dispatch-poc: Phase 0 proof of concept
-// Validates: portable-pty + vt100 + ratatui + keyboard forwarding + bd integration
+// dispatch: Console TUI for Dispatch
 //
 // dispatch-e0k.1: PTY with claude via portable-pty + vt100 + ratatui
 // dispatch-e0k.2: keyboard input forwarding to PTY
 // dispatch-e0k.3: bd create integration from Rust
 // dispatch-bgz.4: modal input model (command mode / input mode)
+// dispatch-bgz.12: config file and CLI subcommands
 
+mod config;
+
+use clap::{Parser, Subcommand};
 use std::{
     io::{self, Read, Write},
     process::Command,
@@ -13,6 +16,23 @@ use std::{
     thread,
     time::Duration,
 };
+
+#[derive(Parser)]
+#[command(name = "dispatch", about = "Dispatch console TUI")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Generate a new pre-shared key and save it to config
+    RegeneratePsk,
+    /// Print the current pre-shared key
+    ShowPsk,
+    /// Print the config file path
+    Config,
+}
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -172,6 +192,30 @@ fn screen_to_lines(screen: &vt100::Screen) -> Vec<Line<'static>> {
 }
 
 fn main() -> io::Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::RegeneratePsk) => {
+            let psk = config::regenerate_psk();
+            println!("{psk}");
+            return Ok(());
+        }
+        Some(Commands::ShowPsk) => {
+            let cfg = config::load_or_create();
+            println!("{}", cfg.auth.psk);
+            return Ok(());
+        }
+        Some(Commands::Config) => {
+            println!("{}", config::config_path().display());
+            return Ok(());
+        }
+        None => {}
+    }
+
+    // Load (or create) config on startup.
+    let cfg = config::load_or_create();
+    let psk_short: String = cfg.auth.psk.chars().take(8).collect();
+
     // Phase 3 (dispatch-e0k.3): create a bd task before starting the PTY
     let task_id = bd_create_task("PoC session: validate PTY + vt100 + ratatui");
     let task_label = match &task_id {
@@ -234,7 +278,7 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let title_base = format!("DISPATCH PoC{task_label}");
+    let title_base = format!("DISPATCH{task_label}  |  psk: {psk_short}...");
 
     // Modal input state (dispatch-bgz.4)
     let mut mode = InputMode::Command;

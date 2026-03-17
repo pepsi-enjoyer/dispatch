@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "dispatch-poc"
+name = "dispatch"
 path = "src/main.rs"
 
 [dependencies]
@@ -15,3 +15,7 @@ crossterm = "0.28"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+dirs = "5"
+toml = "0.8"
+rand = "0.8"
+clap = { version = "4", features = ["derive"] }
