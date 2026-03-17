@@ -1,17 +1,22 @@
 package com.dispatch.radio
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 
 /**
  * Settings screen (dispatch-88k.7).
  *
  * - Console IP + port
- * - Pre-shared key (manual entry)
+ * - Pre-shared key (manual entry or QR scan)
  * - Haptic feedback toggle (default on)
  * - Confirm before send toggle (default off)
  * - Keep screen on toggle (default on)
@@ -29,6 +34,24 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var cbConfirm: CheckBox
     private lateinit var cbScreenOn: CheckBox
     private lateinit var btnSave: Button
+    private lateinit var btnScanQr: Button
+
+    private val qrScanLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val scanned = result.data?.getStringExtra(QrScanActivity.EXTRA_PSK)
+            if (!scanned.isNullOrEmpty()) {
+                etPsk.setText(scanned)
+            }
+        }
+    }
+
+    private val cameraPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) launchQrScanner()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,10 +67,26 @@ class SettingsActivity : AppCompatActivity() {
         cbConfirm = findViewById(R.id.cb_confirm)
         cbScreenOn = findViewById(R.id.cb_screen_on)
         btnSave = findViewById(R.id.btn_save)
+        btnScanQr = findViewById(R.id.btn_scan_qr)
 
         loadSettings()
 
         btnSave.setOnClickListener { saveSettings() }
+        btnScanQr.setOnClickListener { onScanQrClicked() }
+    }
+
+    private fun onScanQrClicked() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            launchQrScanner()
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun launchQrScanner() {
+        qrScanLauncher.launch(Intent(this, QrScanActivity::class.java))
     }
 
     private fun loadSettings() {
