@@ -839,7 +839,7 @@ Radio:
 
 ## Open Questions
 
-1. **`vt100` crate limitations**: the `vt100` crate handles common escape sequences well but may not support every terminal feature Claude Code uses (e.g. advanced alternate screen handling, mouse events, 256-color/truecolor). If gaps appear, `alacritty_terminal` is a more complete (but heavier) alternative.
+1. ~~**`vt100` crate limitations**~~ **Resolved**: start with `vt100` for its simpler API and smaller footprint. If gaps appear in practice (advanced alternate screen, mouse events, 256/truecolor), migrate to `alacritty_terminal`, which is more complete but significantly heavier.
 
 2. **Speech recognition and code vocabulary**: "JWT", "OAuth", "useState" may not transcribe accurately. Investigate `EXTRA_BIASING_WORDS` or post-processing corrections for common programming terms.
 
