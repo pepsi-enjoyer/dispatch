@@ -23,9 +23,7 @@
 // dispatch-1lc.4: task list overlay — full-screen plan view with status groups and agent assignments
 // dispatch-1lc.3: task dependencies — -> arrow syntax in .dispatch/tasks.md, dependency-aware dispatch
 // dispatch-fnx: headless planner — spawns claude -p to decompose complex prompts into task plans
-// dispatch-ct2.4: terminal scrollback in panes — PgUp/PgDn/k/j/G in command mode, configurable buffer
-// dispatch-ct2.5: idle detection refinement — patterns for copilot, shell, and generic tools
-// dispatch-ct2.9: TASKS.md pruning — P key removes completed [x] tasks from tasks.md
+// dispatch-ct2.4: terminal scrollback in panes — PgUp/PgDn in command mode, configurable buffer
 //
 // Layout:
 //   Header bar  : DISPATCH title, radio state, PSK, agent count, PAGE X/Y, clock
@@ -121,6 +119,52 @@ enum Mode {
     Input,
 }
 
+/// Which view is shown in the main area (dispatch-6nm).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    /// Default 2x2 agent grid.
+    Agents,
+    /// Orchestrator conversation log.
+    Orchestrator,
+}
+
+/// A timestamped orchestrator event for the log view (dispatch-6nm).
+#[derive(Clone)]
+struct OrchestratorEvent {
+    time: String,
+    kind: OrchestratorEventKind,
+}
+
+#[derive(Clone)]
+enum OrchestratorEventKind {
+    /// Voice transcript received from radio.
+    VoiceTranscript { text: String },
+    /// Orchestrator decided to plan a complex prompt.
+    PlanStart { prompt: String },
+    /// Planner finished, produced N tasks.
+    PlanComplete { task_count: usize, prompt: String },
+    /// Planner failed; falling back to direct dispatch.
+    PlanFailed,
+    /// Task created in tasks.md.
+    TaskCreated { id: String, title: String },
+    /// Task assigned to an agent slot.
+    TaskAssigned { id: String, agent: String, slot: usize },
+    /// Task completed (idle detected or timeout).
+    TaskComplete { id: String, agent: String },
+    /// Worktree merged successfully.
+    Merged { id: String },
+    /// Merge conflict.
+    MergeConflict { id: String },
+    /// Agent dispatched into a slot.
+    Dispatched { agent: String, slot: usize, tool: String },
+    /// Agent terminated.
+    Terminated { agent: String, slot: usize },
+    /// All agents busy, task queued.
+    Queued { id: String },
+    /// Ready tasks dispatched from the plan.
+    PlanDispatched { count: usize },
+}
+
 /// Active overlay (dispatch-bgz.5).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Overlay {
@@ -148,7 +192,6 @@ struct SlotState {
     tool: String,
     task_id: Option<String>,
     worktree_path: Option<String>, // git worktree path for this task (dispatch-xje)
-    repo_name: String,             // short repo dir name for grid header (dispatch-2dc)
     dispatch_time: Instant,
     dispatch_wall_str: String,
     // PTY
@@ -230,6 +273,10 @@ struct App {
     planner: Option<PlannerState>,
     // Scrollback config (dispatch-ct2.4)
     scrollback_lines: u32,
+    // Orchestrator log view (dispatch-6nm)
+    view_mode: ViewMode,
+    orch_log: Vec<OrchestratorEvent>,
+    orch_scroll: usize, // scroll offset from bottom
 }
 
 impl App {
@@ -271,6 +318,20 @@ impl App {
             task_list_data: Vec::new(),
             planner: None,
             scrollback_lines,
+            view_mode: ViewMode::Agents,
+            orch_log: Vec::new(),
+            orch_scroll: 0,
+        }
+    }
+
+    /// Push an event to the orchestrator log (dispatch-6nm).
+    fn push_orch(&mut self, kind: OrchestratorEventKind) {
+        let time = Local::now().format("%H:%M:%S").to_string();
+        self.orch_log.push(OrchestratorEvent { time, kind });
+        // Cap at 500 entries to bound memory.
+        if self.orch_log.len() > 500 {
+            self.orch_log.remove(0);
+            self.orch_scroll = self.orch_scroll.saturating_sub(1);
         }
     }
 
@@ -401,14 +462,6 @@ impl App {
     }
 }
 
-/// Extract the short directory name from a repo root path (dispatch-2dc).
-fn repo_name_from_path(path: &str) -> &str {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path)
-}
-
 // ── PTY helpers (dispatch-bgz.2, dispatch-bgz.6) ──────────────────────────────
 
 /// Open a PTY and spawn a process. Returns a SlotState on success.
@@ -421,7 +474,6 @@ fn dispatch_slot(
     pane_cols: u16,
     cwd: Option<&str>,
     scrollback_lines: u32,
-    repo_name: &str,
 ) -> Option<SlotState> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -490,7 +542,6 @@ fn dispatch_slot(
         tool: tool_key.to_string(),
         task_id: None,
         worktree_path: None,
-        repo_name: repo_name.to_string(),
         dispatch_time: now,
         dispatch_wall_str: wall,
         screen,
@@ -849,9 +900,9 @@ fn dispatch_plan_tasks(app: &mut App) -> usize {
     let ready = fetch_ready_tasks(&app.repo_root);
     let pane_rows = app.pane_rows;
     let pane_cols = app.pane_cols;
-    let scrollback_lines = app.scrollback_lines;
     let repo_root = app.repo_root.clone();
     let tool_cmd = app.tool_cmd("claude-code").to_string();
+    let scrollback = app.scrollback_lines;
     let mut dispatched = 0;
 
     for task in ready {
@@ -875,7 +926,7 @@ fn dispatch_plan_tasks(app: &mut App) -> usize {
             let worktree = create_worktree(&task.id, &repo_root);
             if let Some(slot) = dispatch_slot(
                 slot_idx, "claude-code", &tool_cmd, pane_rows, pane_cols,
-                worktree.as_deref(), scrollback_lines, repo_name_from_path(&repo_root),
+                worktree.as_deref(), scrollback,
             ) {
                 app.slots[slot_idx] = Some(slot);
             } else {
@@ -896,6 +947,7 @@ fn dispatch_plan_tasks(app: &mut App) -> usize {
             slot.last_output_at = Instant::now();
             slot.display_name().to_string()
         };
+        app.push_orch(OrchestratorEventKind::TaskAssigned { id: task.id.clone(), agent: display_name.clone(), slot: slot_idx + 1 });
         app.push_ticker(format!(
             "PLAN DISPATCH: {} -> {} (slot {})",
             task.id, display_name, slot_idx + 1
@@ -903,29 +955,6 @@ fn dispatch_plan_tasks(app: &mut App) -> usize {
         dispatched += 1;
     }
     dispatched
-}
-
-/// Remove completed [x] tasks from .dispatch/tasks.md (dispatch-ct2.9).
-/// Returns the number of tasks pruned.
-fn prune_completed_tasks(repo_root: &str) -> usize {
-    let (lines, tasks) = parse_tasks_md(repo_root);
-    let remove: std::collections::HashSet<usize> = tasks
-        .iter()
-        .filter(|t| t.status == 'x')
-        .map(|t| t.line_idx)
-        .collect();
-    if remove.is_empty() {
-        return 0;
-    }
-    let kept: Vec<&str> = lines
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !remove.contains(i))
-        .map(|(_, l)| l.as_str())
-        .collect();
-    let path = tasks_md_path(repo_root);
-    let _ = std::fs::write(&path, kept.join("\n") + "\n");
-    remove.len()
 }
 
 // ── task completion detection (dispatch-1lc.2) ────────────────────────────────
@@ -952,25 +981,21 @@ fn compute_screen_hash(screen: &vt100::Screen) -> u64 {
 }
 
 /// Return true if the last non-blank row of the screen matches the idle prompt
-/// pattern for the given tool (dispatch-ct2.5).
+/// pattern for the given tool.
 ///
-/// | Tool        | Idle pattern                                       |
-/// |-------------|----------------------------------------------------|
-/// | claude-code | `>` or `> ` on last active row                     |
-/// | copilot     | `?` or line containing "What would you like"       |
-/// | shell/*     | ends with `$ ` or `# ` (standard shell prompts)    |
+/// claude-code idle: last non-blank row is exactly ">" or "> "
 fn is_idle_prompt(screen: &vt100::Screen, tool: &str) -> bool {
-    let (rows, _) = screen.size();
-    let last_text = (0..rows).rev().map(|r| screen_row_text(screen, r)).find(|t| !t.is_empty());
-    let text = match last_text {
-        Some(t) => t,
-        None => return false,
-    };
-    match tool {
-        "claude-code" => text == ">" || text == "> ",
-        "copilot" => text == "?" || text.contains("What would you like"),
-        _ => text.ends_with("$ ") || text.ends_with("# "),
+    if tool != "claude-code" {
+        return false;
     }
+    let (rows, _) = screen.size();
+    for r in (0..rows).rev() {
+        let text = screen_row_text(screen, r);
+        if !text.is_empty() {
+            return text == ">" || text == "> ";
+        }
+    }
+    false
 }
 
 // ── worktree helpers (dispatch-xje) ───────────────────────────────────────────
@@ -1234,10 +1259,6 @@ fn pane_info_strip(global_idx: usize, local_idx: usize, app: &App) -> Text<'stat
                     Style::default().fg(Color::DarkGray),
                 ),
                 task_span,
-                Span::styled(
-                    format!(" | {}", agent.repo_name),
-                    Style::default().fg(Color::DarkGray),
-                ),
             ]);
             let runtime = format_runtime(agent.dispatch_time.elapsed());
             let line3 = Line::from(Span::styled(
@@ -1397,6 +1418,149 @@ fn render_panes(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// Render the orchestrator conversation log view (dispatch-6nm).
+/// Replaces the panes area when ViewMode::Orchestrator is active.
+fn render_orchestrator(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .title(Span::styled(
+            " ORCHESTRATOR ",
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.orch_log.is_empty() {
+        let empty = Paragraph::new(Line::from(Span::styled(
+            " No events yet. The orchestrator log will show voice transcripts, reasoning, and tool calls.",
+            Style::default().fg(Color::DarkGray),
+        )));
+        f.render_widget(empty, inner);
+        return;
+    }
+
+    // Build lines from events.
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for ev in &app.orch_log {
+        let (icon, style, body) = match &ev.kind {
+            OrchestratorEventKind::VoiceTranscript { text } => (
+                "MIC",
+                Style::default().fg(Color::Green),
+                format!("\"{}\"", text),
+            ),
+            OrchestratorEventKind::PlanStart { prompt } => (
+                "PLAN",
+                Style::default().fg(Color::Yellow),
+                format!("planning: {}", truncate(prompt, 80)),
+            ),
+            OrchestratorEventKind::PlanComplete { task_count, prompt } => (
+                "PLAN",
+                Style::default().fg(Color::Green),
+                format!("{} tasks from \"{}\"", task_count, truncate(prompt, 60)),
+            ),
+            OrchestratorEventKind::PlanFailed => (
+                "PLAN",
+                Style::default().fg(Color::Red),
+                "failed, falling back to direct dispatch".to_string(),
+            ),
+            OrchestratorEventKind::TaskCreated { id, title } => (
+                "TASK",
+                Style::default().fg(Color::Cyan),
+                format!("created {}: {}", id, truncate(title, 60)),
+            ),
+            OrchestratorEventKind::TaskAssigned { id, agent, slot } => (
+                "ASSIGN",
+                Style::default().fg(Color::Yellow),
+                format!("{} -> {} (slot {})", id, agent, slot),
+            ),
+            OrchestratorEventKind::TaskComplete { id, agent } => (
+                "DONE",
+                Style::default().fg(Color::Green),
+                format!("{} completed by {}", id, agent),
+            ),
+            OrchestratorEventKind::Merged { id } => (
+                "MERGE",
+                Style::default().fg(Color::Green),
+                format!("{} merged to main", id),
+            ),
+            OrchestratorEventKind::MergeConflict { id } => (
+                "CONFLICT",
+                Style::default().fg(Color::Red),
+                format!("{} has merge conflicts", id),
+            ),
+            OrchestratorEventKind::Dispatched { agent, slot, tool } => (
+                "DISPATCH",
+                Style::default().fg(Color::Cyan),
+                format!("{} in slot {} ({})", agent, slot, tool),
+            ),
+            OrchestratorEventKind::Terminated { agent, slot } => (
+                "TERM",
+                Style::default().fg(Color::Red),
+                format!("{} (slot {})", agent, slot),
+            ),
+            OrchestratorEventKind::Queued { id } => (
+                "QUEUE",
+                Style::default().fg(Color::Yellow),
+                format!("{} waiting for available agent", id),
+            ),
+            OrchestratorEventKind::PlanDispatched { count } => (
+                "PLAN",
+                Style::default().fg(Color::Cyan),
+                format!("{} ready tasks dispatched", count),
+            ),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} ", ev.time),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(format!("{:<8} ", icon), style.add_modifier(Modifier::BOLD)),
+            Span::styled(body, Style::default().fg(Color::White)),
+        ]));
+    }
+
+    // Apply scroll from bottom.
+    let visible = inner.height as usize;
+    let total = lines.len();
+    let max_scroll = total.saturating_sub(visible);
+    let scroll = app.orch_scroll.min(max_scroll);
+    let start = total.saturating_sub(visible + scroll);
+    let end = (start + visible).min(total);
+    let visible_lines: Vec<Line<'static>> = lines[start..end].to_vec();
+
+    let paragraph = Paragraph::new(Text::from(visible_lines));
+    f.render_widget(paragraph, inner);
+
+    // Scroll indicator on the right edge.
+    if max_scroll > 0 {
+        let pct = if scroll == 0 { 100 } else { ((max_scroll - scroll) * 100) / max_scroll };
+        let indicator = format!(" {}% ", pct);
+        let indicator_area = Rect {
+            x: inner.x + inner.width.saturating_sub(indicator.len() as u16 + 1),
+            y: area.y,
+            width: indicator.len() as u16,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(indicator, Style::default().fg(Color::DarkGray))),
+            indicator_area,
+        );
+    }
+}
+
+/// Truncate a string to `max` chars, appending "..." if trimmed.
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else if max > 3 {
+        format!("{}...", &s[..max - 3])
+    } else {
+        s[..max].to_string()
+    }
+}
+
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let target_g = app.target_global();
     let target_name = app
@@ -1434,8 +1598,19 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 Some(cs) => format!(" │ WS→{} ", cs),
                 None => String::new(),
             };
+            // dispatch-6nm: show different hints when orchestrator view is active.
+            let hints = if app.view_mode == ViewMode::Orchestrator {
+                "│ o agents │ Up/Down scroll │ PgUp/PgDn │ q quit │ ? help"
+            } else {
+                "│ i/Enter input │ 1-4 slot │ Tab cycle │ ]/[ page │ PgUp/Dn scroll │ n/N dispatch │ x term │ R rename │ t tasks │ o orch │ p psk │ q quit │ ? help"
+            };
+            let view_indicator = match app.view_mode {
+                ViewMode::Agents => "",
+                ViewMode::Orchestrator => " ORCH │",
+            };
             Line::from(vec![
                 Span::styled(" ▸ ", Style::default().fg(Color::Cyan)),
+                Span::styled(view_indicator, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
                 Span::styled(radio_label, Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!(" │ TARGET: {} ", target_name),
@@ -1443,7 +1618,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 ),
                 Span::styled(ws_target_str, Style::default().fg(Color::Cyan)),
                 Span::styled(
-                    "│ i/Enter input │ 1-4 slot │ Tab cycle │ k/j scroll │ n/N dispatch │ x term │ t tasks │ P prune │ Q qr │ ? help",
+                    hints,
                     Style::default().fg(Color::DarkGray),
                 ),
             ])
@@ -1477,7 +1652,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn render_help_overlay(f: &mut Frame, area: Rect) {
-    let r = centered_rect(52, 28, area);
+    let r = centered_rect(52, 26, area);
     f.render_widget(Clear, r);
     let lines = vec![
         Line::from(Span::styled(
@@ -1491,15 +1666,13 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::raw("  Shift+Tab    Prev slot (all pages)")),
         Line::from(Span::raw("  ] / Shift+→  Next page")),
         Line::from(Span::raw("  [ / Shift+←  Prev page")),
-        Line::from(Span::raw("  k / Up / PgUp  Scroll up (half page)")),
-        Line::from(Span::raw("  j / Dn / PgDn  Scroll down (half page)")),
-        Line::from(Span::raw("  G            Snap to live output")),
+        Line::from(Span::raw("  PgUp / PgDn  Scroll pane output")),
         Line::from(Span::raw("  n            Dispatch into first empty slot")),
         Line::from(Span::raw("  N            Dispatch into specific slot")),
         Line::from(Span::raw("  x            Terminate target agent")),
         Line::from(Span::raw("  R            Rename target agent")),
         Line::from(Span::raw("  t            Task list overlay")),
-        Line::from(Span::raw("  P            Prune completed tasks")),
+        Line::from(Span::raw("  o            Toggle orchestrator view")),
         Line::from(Span::raw("  p            Toggle PSK visibility")),
         Line::from(Span::raw("  Q            Show QR code for radio pairing")),
         Line::from(Span::raw("  q            Quit (confirms if agents running)")),
@@ -2090,10 +2263,9 @@ fn main() -> io::Result<()> {
         .as_deref()
         .and_then(|id| create_worktree(id, &repo_root));
     let claude_cmd = app.tool_cmd("claude-code").to_string();
-    let short_repo_name = repo_name_from_path(&repo_root).to_string();
     if let Some(mut slot) = dispatch_slot(
         0, "claude-code", &claude_cmd, pane_rows, pane_cols,
-        startup_worktree.as_deref(), app.scrollback_lines, &short_repo_name,
+        startup_worktree.as_deref(), app.scrollback_lines,
     ) {
         // dispatch-1lc.3: task lifecycle via .dispatch/tasks.md
         if let Some(id) = &startup_task_id {
@@ -2105,6 +2277,7 @@ fn main() -> io::Result<()> {
             slot.worktree_path = startup_worktree;
         }
         let name = slot.display_name().to_string();
+        app.push_orch(OrchestratorEventKind::Dispatched { agent: name.clone(), slot: 1, tool: "claude-code".to_string() });
         app.push_ticker(format!("DISPATCH: {} launched in slot 1 — claude-code ready", name));
         app.slots[0] = Some(slot);
     }
@@ -2142,11 +2315,14 @@ fn main() -> io::Result<()> {
                     let worktree_path = s.worktree_path.clone();
                     app.slots[i] = None;
                     if let Some(id) = task_id {
+                        app.push_orch(OrchestratorEventKind::TaskComplete { id: id.clone(), agent: callsign.clone() });
                         // dispatch-xje: merge worktree before closing; flag on conflict.
                         if worktree_path.is_some() {
                             if merge_worktree(&id, &app.repo_root) {
+                                app.push_orch(OrchestratorEventKind::Merged { id: id.clone() });
                                 app.push_ticker(format!("TASK COMPLETE: {} merged {} — slot {} now standby", callsign, id, i + 1));
                             } else {
+                                app.push_orch(OrchestratorEventKind::MergeConflict { id: id.clone() });
                                 app.conflict_tasks.push(id.clone());
                                 app.push_ticker(format!("MERGE CONFLICT: {} in {} — resolve manually", id, callsign));
                             }
@@ -2214,6 +2390,8 @@ fn main() -> io::Result<()> {
         }
 
         for (i, task_id) in completed {
+            let agent_name = app.slots[i].as_ref().map(|s| s.display_name().to_string()).unwrap_or_default();
+            app.push_orch(OrchestratorEventKind::TaskComplete { id: task_id.clone(), agent: agent_name });
             if let Some(slot) = app.slots[i].as_mut() {
                 slot.task_id = None;
                 slot.idle_since = None;
@@ -2226,6 +2404,8 @@ fn main() -> io::Result<()> {
             // Pick up next available queued task and assign it to the idle slot.
             let next = fetch_ready_tasks(&app.repo_root).into_iter().next();
             if let Some(qt) = next {
+                let mut assigned = false;
+                let mut assigned_callsign = String::new();
                 if let Some(slot) = app.slots[i].as_mut() {
                     let callsign = slot.callsign.clone();
                     if update_task_in_file(&app.repo_root, &qt.id, '~', Some(&callsign)) {
@@ -2234,7 +2414,12 @@ fn main() -> io::Result<()> {
                         let _ = slot.writer.flush();
                         slot.task_id = Some(qt.id.clone());
                         slot.last_output_at = Instant::now();
+                        assigned = true;
+                        assigned_callsign = callsign;
                     }
+                }
+                if assigned {
+                    app.push_orch(OrchestratorEventKind::TaskAssigned { id: qt.id.clone(), agent: assigned_callsign, slot: i + 1 });
                 }
                 app.queued_tasks.retain(|t| t.id != qt.id);
             }
@@ -2267,7 +2452,11 @@ fn main() -> io::Result<()> {
                     let _ = std::fs::write(tasks_md_path(&app.repo_root), &plan_text);
                     let (_, tasks) = parse_tasks_md(&app.repo_root);
                     let total = tasks.len();
+                    app.push_orch(OrchestratorEventKind::PlanComplete { task_count: total, prompt: prompt.clone() });
                     let dispatched = dispatch_plan_tasks(&mut app);
+                    if dispatched > 0 {
+                        app.push_orch(OrchestratorEventKind::PlanDispatched { count: dispatched });
+                    }
                     app.push_ticker(format!(
                         "PLAN READY: {} tasks from '{}' — {} dispatched now",
                         total,
@@ -2276,6 +2465,7 @@ fn main() -> io::Result<()> {
                     ));
                 } else {
                     // Planner failed: fall back to direct single-task dispatch.
+                    app.push_orch(OrchestratorEventKind::PlanFailed);
                     app.push_ticker("PLANNER FAILED: falling back to direct dispatch".to_string());
                     if let Some(id) = create_task_in_file(&app.repo_root, &prompt) {
                         // Try to dispatch directly to the first available slot.
@@ -2284,7 +2474,7 @@ fn main() -> io::Result<()> {
                             let worktree = create_worktree(&id, &app.repo_root);
                             if let Some(mut slot) = dispatch_slot(
                                 g, "claude-code", &cmd, app.pane_rows, app.pane_cols,
-                                worktree.as_deref(), app.scrollback_lines, repo_name_from_path(&app.repo_root),
+                                worktree.as_deref(), app.scrollback_lines,
                             ) {
                                 update_task_in_file(&app.repo_root, &id, '~', Some(&slot.callsign));
                                 let prefixed = format!("[Dispatch task {id}] {prompt}\r");
@@ -2307,28 +2497,34 @@ fn main() -> io::Result<()> {
         while let Ok(event) = ws_event_rx.try_recv() {
             match event {
                 ws_server::WsEvent::AutoDispatch { slot, prompt } => {
+                    app.push_orch(OrchestratorEventKind::VoiceTranscript { text: prompt.clone() });
                     let g = (slot as usize).saturating_sub(1);
                     if g < MAX_SLOTS {
                         // Spawn a PTY if the slot is empty.
                         if app.slots[g].is_none() {
                             let cmd = app.tool_cmd("claude-code").to_string();
                             if let Some(s) = dispatch_slot(
-                                g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None,
-                                app.scrollback_lines, repo_name_from_path(&app.repo_root),
+                                g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None, app.scrollback_lines,
                             ) {
                                 let name = s.display_name().to_string();
+                                app.push_orch(OrchestratorEventKind::Dispatched { agent: name.clone(), slot: g + 1, tool: "claude-code".to_string() });
                                 app.slots[g] = Some(s);
                                 app.push_ticker(format!("AUTO-DISPATCH: {} launched in slot {}", name, g + 1));
                             }
                         }
                         let task_id = create_task_in_file(&app.repo_root, &prompt);
+                        if let Some(ref id) = task_id {
+                            app.push_orch(OrchestratorEventKind::TaskCreated { id: id.clone(), title: prompt.clone() });
+                        }
                         let mut ticker_msg: Option<String> = None;
+                        let mut orch_assign: Option<(String, String)> = None;
                         if let Some(slot_state) = app.slots[g].as_mut() {
                             if let Some(ref id) = task_id {
                                 update_task_in_file(&app.repo_root, id, '~', Some(&slot_state.callsign));
                                 let prefixed = format!("[Dispatch task {id}] {prompt}\r");
                                 let _ = slot_state.writer.write_all(prefixed.as_bytes());
                                 let _ = slot_state.writer.flush();
+                                orch_assign = Some((id.clone(), slot_state.callsign.clone()));
                                 ticker_msg = Some(format!("AUTO-DISPATCH: task {} assigned to {}", id, slot_state.callsign));
                             } else {
                                 let with_enter = format!("{prompt}\r");
@@ -2337,21 +2533,28 @@ fn main() -> io::Result<()> {
                             }
                             slot_state.task_id = task_id;
                         }
+                        if let Some((id, agent)) = orch_assign {
+                            app.push_orch(OrchestratorEventKind::TaskAssigned { id, agent, slot: g + 1 });
+                        }
                         if let Some(msg) = ticker_msg {
                             app.push_ticker(msg);
                         }
                     }
                 }
                 ws_server::WsEvent::QueueTask { prompt } => {
+                    app.push_orch(OrchestratorEventKind::VoiceTranscript { text: prompt.clone() });
                     // Create an open task in .dispatch/tasks.md; it will
                     // surface in the next poll and be picked up when a slot frees.
                     if let Some(id) = create_task_in_file(&app.repo_root, &prompt) {
+                        app.push_orch(OrchestratorEventKind::Queued { id: id.clone() });
                         app.push_ticker(format!("QUEUED: all agents busy — task {} waiting", id));
                     }
                 }
                 ws_server::WsEvent::PlanRequest { prompt } => {
+                    app.push_orch(OrchestratorEventKind::VoiceTranscript { text: prompt.clone() });
                     // dispatch-fnx: spawn a headless planner for complex prompts.
                     if app.planner.is_none() {
+                        app.push_orch(OrchestratorEventKind::PlanStart { prompt: prompt.clone() });
                         let cmd = app.tool_cmd("claude-code").to_string();
                         let rx = spawn_planner(&prompt, &cmd, &app.repo_root);
                         app.planner = Some(PlannerState { prompt: prompt.clone(), receiver: rx });
@@ -2364,6 +2567,7 @@ fn main() -> io::Result<()> {
                     } else {
                         // Planner already running; queue as a direct task.
                         if let Some(id) = create_task_in_file(&app.repo_root, &prompt) {
+                            app.push_orch(OrchestratorEventKind::Queued { id: id.clone() });
                             app.push_ticker(format!("QUEUED: planner busy — task {} waiting", id));
                         }
                     }
@@ -2385,7 +2589,11 @@ fn main() -> io::Result<()> {
 
             render_header(f, chunks[0], &app);
             render_ticker(f, chunks[1], &app);
-            render_panes(f, chunks[2], &app);
+            // dispatch-6nm: toggle between agent grid and orchestrator view.
+            match app.view_mode {
+                ViewMode::Agents => render_panes(f, chunks[2], &app),
+                ViewMode::Orchestrator => render_orchestrator(f, chunks[2], &app),
+            }
             render_footer(f, chunks[3], &app);
 
             match app.overlay {
@@ -2483,6 +2691,9 @@ fn main() -> io::Result<()> {
                                     KeyCode::Char('y') | KeyCode::Char('Y') => {
                                         let target_g = app.target_global();
                                         let callsign = app.slots[target_g].as_ref().map(|s| s.display_name().to_string()).unwrap_or_default();
+                                        if !callsign.is_empty() {
+                                            app.push_orch(OrchestratorEventKind::Terminated { agent: callsign.clone(), slot: target_g + 1 });
+                                        }
                                         if let Some(task_id) = terminate_slot(&mut app.slots[target_g]) {
                                             update_task_in_file(&app.repo_root, &task_id, ' ', None);
                                             app.push_ticker(format!("TERMINATED: {} (slot {}) — task {} reopened", callsign, target_g + 1, task_id));
@@ -2511,10 +2722,10 @@ fn main() -> io::Result<()> {
                                                 if app.slots[g].is_none() {
                                                     let cmd = app.tool_cmd("claude-code").to_string();
                                                     if let Some(slot) = dispatch_slot(
-                                                        g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None,
-                                                        app.scrollback_lines, repo_name_from_path(&app.repo_root),
+                                                        g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None, app.scrollback_lines,
                                                     ) {
                                                         let name = slot.display_name().to_string();
+                                                        app.push_orch(OrchestratorEventKind::Dispatched { agent: name.clone(), slot: g + 1, tool: "claude-code".to_string() });
                                                         app.push_ticker(format!("DISPATCH: {} launched in slot {}", name, g + 1));
                                                         app.slots[g] = Some(slot);
                                                     }
@@ -2632,12 +2843,12 @@ fn main() -> io::Result<()> {
                                     if let Some(g) = app.slots.iter().position(|s| s.is_none()) {
                                         let cmd = app.tool_cmd("claude-code").to_string();
                                         if let Some(slot) = dispatch_slot(
-                                            g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None,
-                                            app.scrollback_lines, repo_name_from_path(&app.repo_root),
+                                            g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None, app.scrollback_lines,
                                         ) {
                                             let page = g / SLOTS_PER_PAGE;
                                             let local = g % SLOTS_PER_PAGE;
                                             let name = slot.display_name().to_string();
+                                            app.push_orch(OrchestratorEventKind::Dispatched { agent: name.clone(), slot: g + 1, tool: "claude-code".to_string() });
                                             app.push_ticker(format!("DISPATCH: {} launched in slot {}", name, g + 1));
                                             app.slots[g] = Some(slot);
                                             app.current_page = page;
@@ -2672,38 +2883,50 @@ fn main() -> io::Result<()> {
                                     app.task_list_data = fetch_task_list_from_file(&app.repo_root, &app.slots);
                                     app.overlay = Overlay::TaskList;
                                 }
-                                // Prune completed tasks (dispatch-ct2.9)
-                                KeyCode::Char('P') => {
-                                    let n = prune_completed_tasks(&app.repo_root);
-                                    if n > 0 {
-                                        app.push_ticker(format!("PRUNED: {} completed task{} removed from tasks.md", n, if n == 1 { "" } else { "s" }));
-                                    } else {
-                                        app.push_ticker("PRUNE: no completed tasks to remove".to_string());
-                                    }
-                                }
                                 KeyCode::Char('p') => app.psk_expanded = !app.psk_expanded,
                                 KeyCode::Char('Q') => app.overlay = Overlay::QrCode,
                                 KeyCode::Char('?') => app.overlay = Overlay::Help,
 
-                                // Scrollback (dispatch-ct2.4, dispatch-ct2.5)
-                                KeyCode::PageUp | KeyCode::Char('k') | KeyCode::Up => {
-                                    let target_g = app.target_global();
-                                    if let Some(Some(slot)) = app.slots.get_mut(target_g) {
-                                        let half = (app.pane_rows as usize / 2).max(1);
-                                        slot.scroll_offset = slot.scroll_offset.saturating_add(half);
+                                // Toggle orchestrator view (dispatch-6nm)
+                                KeyCode::Char('o') => {
+                                    app.view_mode = match app.view_mode {
+                                        ViewMode::Agents => ViewMode::Orchestrator,
+                                        ViewMode::Orchestrator => ViewMode::Agents,
+                                    };
+                                    app.orch_scroll = 0;
+                                }
+
+                                // Orchestrator scroll (dispatch-6nm)
+                                KeyCode::Up if app.view_mode == ViewMode::Orchestrator => {
+                                    app.orch_scroll = app.orch_scroll.saturating_add(1);
+                                }
+                                KeyCode::Down if app.view_mode == ViewMode::Orchestrator => {
+                                    app.orch_scroll = app.orch_scroll.saturating_sub(1);
+                                }
+
+                                // PgUp/PgDn: orchestrator scroll or pane scrollback
+                                KeyCode::PageUp => {
+                                    if app.view_mode == ViewMode::Orchestrator {
+                                        app.orch_scroll = app.orch_scroll.saturating_add(10);
+                                    } else {
+                                        // Scrollback (dispatch-ct2.4)
+                                        let target_g = app.target_global();
+                                        if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                            let half = (app.pane_rows as usize) / 2;
+                                            slot.scroll_offset = slot.scroll_offset.saturating_add(half);
+                                        }
                                     }
                                 }
-                                KeyCode::PageDown | KeyCode::Char('j') | KeyCode::Down => {
-                                    let target_g = app.target_global();
-                                    if let Some(Some(slot)) = app.slots.get_mut(target_g) {
-                                        let half = (app.pane_rows as usize / 2).max(1);
-                                        slot.scroll_offset = slot.scroll_offset.saturating_sub(half);
-                                    }
-                                }
-                                KeyCode::Char('G') => {
-                                    let target_g = app.target_global();
-                                    if let Some(Some(slot)) = app.slots.get_mut(target_g) {
-                                        slot.scroll_offset = 0;
+                                KeyCode::PageDown => {
+                                    if app.view_mode == ViewMode::Orchestrator {
+                                        app.orch_scroll = app.orch_scroll.saturating_sub(10);
+                                    } else {
+                                        // Scrollback (dispatch-ct2.4)
+                                        let target_g = app.target_global();
+                                        if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                            let half = (app.pane_rows as usize) / 2;
+                                            slot.scroll_offset = slot.scroll_offset.saturating_sub(half);
+                                        }
                                     }
                                 }
 
