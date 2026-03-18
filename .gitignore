@@ -4,6 +4,14 @@
 # Beads issue tracker (local only)
 .beads/
 
-# Dolt database files (added by bd init)
+# Obelisk orchestrator
+.obelisk/
+obelisk.toml
+
+# Dolt database files
 .dolt/
+config.yaml
 *.db
+
+# Local logs
+logs/
