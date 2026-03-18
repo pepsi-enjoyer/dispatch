@@ -21,6 +21,9 @@
 // dispatch-xje: git worktree-per-task isolation
 // dispatch-1lc.3: task dependencies — -> arrow syntax in .dispatch/tasks.md, file-based task ops
 // dispatch-1lc.4: task list overlay — full-screen plan view with status groups and agent assignments
+// dispatch-ct2.4: terminal scrollback — k/j/G scroll, configurable scrollback_lines, auto-snap on output
+// dispatch-ct2.5: idle detection refinement — patterns for copilot, shell, and generic tools
+// dispatch-ct2.9: TASKS.md pruning — P key removes completed [x] tasks from tasks.md
 //
 // Layout:
 //   Header bar  : DISPATCH title, radio state, PSK, agent count, PAGE X/Y, clock
@@ -154,6 +157,8 @@ struct SlotState {
     last_output_at: Instant,     // when screen content last changed
     last_screen_hash: u64,       // hash of screen to detect changes
     idle_since: Option<Instant>, // when idle prompt was first seen (for 500ms debounce)
+    // Scrollback (dispatch-ct2.4)
+    scroll_offset: usize,       // 0 = live view, >0 = scrolled back N lines
 }
 
 impl SlotState {
@@ -209,6 +214,8 @@ struct App {
     repo_root: String,
     // Task list overlay cache (dispatch-1lc.4): loaded when overlay opens
     task_list_data: Vec<TaskEntry>,
+    // Scrollback config (dispatch-ct2.4)
+    scrollback_lines: usize,
 }
 
 impl App {
@@ -220,6 +227,7 @@ impl App {
         tools: std::collections::HashMap<String, String>,
         completion_timeout: Duration,
         repo_root: String,
+        scrollback_lines: usize,
     ) -> Self {
         App {
             slots: std::array::from_fn(|_| None),
@@ -245,6 +253,7 @@ impl App {
             conflict_tasks: Vec::new(),
             repo_root,
             task_list_data: Vec::new(),
+            scrollback_lines,
         }
     }
 
@@ -386,6 +395,7 @@ fn dispatch_slot(
     pane_rows: u16,
     pane_cols: u16,
     cwd: Option<&str>,
+    scrollback_lines: usize,
 ) -> Option<SlotState> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -422,7 +432,7 @@ fn dispatch_slot(
 
     let child_pid = child.process_id();
 
-    let screen = Arc::new(Mutex::new(vt100::Parser::new(pane_rows, pane_cols, 0)));
+    let screen = Arc::new(Mutex::new(vt100::Parser::new(pane_rows, pane_cols, scrollback_lines)));
     let screen_w = Arc::clone(&screen);
     let child_exited = Arc::new(AtomicBool::new(false));
     let child_exited_w = Arc::clone(&child_exited);
@@ -464,6 +474,7 @@ fn dispatch_slot(
         last_output_at: now,
         last_screen_hash: 0,
         idle_since: None,
+        scroll_offset: 0,
     })
 }
 
@@ -496,11 +507,12 @@ fn terminate_slot(slot: &mut Option<SlotState>) -> Option<String> {
 }
 
 /// Resize all active PTYs to the new pane size (dispatch-bgz.6).
-fn resize_all_slots(slots: &mut [Option<SlotState>; MAX_SLOTS], new_size: PtySize) {
+fn resize_all_slots(slots: &mut [Option<SlotState>; MAX_SLOTS], new_size: PtySize, scrollback_lines: usize) {
     for slot in slots.iter_mut().flatten() {
         let _ = slot.master.resize(new_size);
         let mut parser = slot.screen.lock().unwrap();
-        *parser = vt100::Parser::new(new_size.rows, new_size.cols, 0);
+        *parser = vt100::Parser::new(new_size.rows, new_size.cols, scrollback_lines);
+        slot.scroll_offset = 0;
     }
 }
 
@@ -734,6 +746,29 @@ fn fetch_task_list_from_file(
         .collect()
 }
 
+/// Remove completed [x] tasks from .dispatch/tasks.md (dispatch-ct2.9).
+/// Returns the number of tasks pruned.
+fn prune_completed_tasks(repo_root: &str) -> usize {
+    let (lines, tasks) = parse_tasks_md(repo_root);
+    let remove: std::collections::HashSet<usize> = tasks
+        .iter()
+        .filter(|t| t.status == 'x')
+        .map(|t| t.line_idx)
+        .collect();
+    if remove.is_empty() {
+        return 0;
+    }
+    let kept: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !remove.contains(i))
+        .map(|(_, l)| l.as_str())
+        .collect();
+    let path = tasks_md_path(repo_root);
+    let _ = std::fs::write(&path, kept.join("\n") + "\n");
+    remove.len()
+}
+
 // ── task completion detection (dispatch-1lc.2) ────────────────────────────────
 
 /// Extract the text content of a single screen row, trimming trailing spaces.
@@ -758,21 +793,25 @@ fn compute_screen_hash(screen: &vt100::Screen) -> u64 {
 }
 
 /// Return true if the last non-blank row of the screen matches the idle prompt
-/// pattern for the given tool.
+/// pattern for the given tool (dispatch-ct2.5).
 ///
-/// claude-code idle: last non-blank row is exactly ">" or "> "
+/// | Tool        | Idle pattern                                       |
+/// |-------------|----------------------------------------------------|
+/// | claude-code | `>` or `> ` on last active row                     |
+/// | copilot     | `?` or line containing "What would you like"       |
+/// | shell/*     | ends with `$ ` or `# ` (standard shell prompts)    |
 fn is_idle_prompt(screen: &vt100::Screen, tool: &str) -> bool {
-    if tool != "claude-code" {
-        return false;
-    }
     let (rows, _) = screen.size();
-    for r in (0..rows).rev() {
-        let text = screen_row_text(screen, r);
-        if !text.is_empty() {
-            return text == ">" || text == "> ";
-        }
+    let last_text = (0..rows).rev().map(|r| screen_row_text(screen, r)).find(|t| !t.is_empty());
+    let text = match last_text {
+        Some(t) => t,
+        None => return false,
+    };
+    match tool {
+        "claude-code" => text == ">" || text == "> ",
+        "copilot" => text == "?" || text.contains("What would you like"),
+        _ => text.ends_with("$ ") || text.ends_with("# "),
     }
-    false
 }
 
 // ── worktree helpers (dispatch-xje) ───────────────────────────────────────────
@@ -1131,6 +1170,22 @@ fn render_pane(
 
     if let Some(lines) = vt_lines {
         f.render_widget(Paragraph::new(Text::from(lines)), chunks[1]);
+        // dispatch-ct2.4: show scroll indicator when not at live view.
+        if let Some(Some(slot)) = app.slots.get(global_idx) {
+            if slot.scroll_offset > 0 {
+                let label = format!(" SCROLL +{} ", slot.scroll_offset);
+                let label_w = label.len() as u16;
+                let x = chunks[1].x + chunks[1].width.saturating_sub(label_w);
+                let indicator = Rect { x, y: chunks[1].y, width: label_w, height: 1 };
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        label,
+                        Style::default().fg(Color::Black).bg(Color::Yellow),
+                    )),
+                    indicator,
+                );
+            }
+        }
     } else {
         f.render_widget(Paragraph::new(standby_body(global_idx, app)), chunks[1]);
     }
@@ -1141,14 +1196,17 @@ fn render_panes(f: &mut Frame, area: Rect, app: &App) {
     let page_start = app.current_page * SLOTS_PER_PAGE;
 
     // Pre-compute vt lines for each visible slot (hold locks briefly, then release).
+    // dispatch-ct2.4: apply scroll_offset via parser.set_scrollback().
     let mut page_lines: [Option<Vec<Line<'static>>>; SLOTS_PER_PAGE] =
         [None, None, None, None];
     for local in 0..SLOTS_PER_PAGE {
         let g = page_start + local;
         if g < MAX_SLOTS {
             if let Some(slot) = &app.slots[g] {
-                let parser = slot.screen.lock().unwrap();
+                let mut parser = slot.screen.lock().unwrap();
+                parser.set_scrollback(slot.scroll_offset);
                 page_lines[local] = Some(screen_to_lines(parser.screen()));
+                parser.set_scrollback(0); // restore live view for output processing
             }
         }
     }
@@ -1223,7 +1281,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 ),
                 Span::styled(ws_target_str, Style::default().fg(Color::Cyan)),
                 Span::styled(
-                    "│ i/Enter input │ 1-4 slot │ Tab cycle │ ]/[ page │ n/N dispatch │ x term │ R rename │ t tasks │ p psk │ q quit │ ? help",
+                    "│ i/Enter input │ 1-4 slot │ Tab cycle │ k/j scroll │ n/N dispatch │ x term │ t tasks │ P prune │ ? help",
                     Style::default().fg(Color::DarkGray),
                 ),
             ])
@@ -1257,7 +1315,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn render_help_overlay(f: &mut Frame, area: Rect) {
-    let r = centered_rect(52, 22, area);
+    let r = centered_rect(52, 26, area);
     f.render_widget(Clear, r);
     let lines = vec![
         Line::from(Span::styled(
@@ -1271,11 +1329,15 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::raw("  Shift+Tab    Prev slot (all pages)")),
         Line::from(Span::raw("  ] / Shift+→  Next page")),
         Line::from(Span::raw("  [ / Shift+←  Prev page")),
+        Line::from(Span::raw("  k / Up       Scroll up (half page)")),
+        Line::from(Span::raw("  j / Down     Scroll down (half page)")),
+        Line::from(Span::raw("  G            Snap to live output")),
         Line::from(Span::raw("  n            Dispatch into first empty slot")),
         Line::from(Span::raw("  N            Dispatch into specific slot")),
         Line::from(Span::raw("  x            Terminate target agent")),
         Line::from(Span::raw("  R            Rename target agent")),
         Line::from(Span::raw("  t            Task list overlay")),
+        Line::from(Span::raw("  P            Prune completed tasks")),
         Line::from(Span::raw("  p            Toggle PSK visibility")),
         Line::from(Span::raw("  q            Quit (confirms if agents running)")),
         Line::from(Span::raw("  ?            This help screen")),
@@ -1640,6 +1702,7 @@ fn main() -> io::Result<()> {
         })
         .unwrap_or_else(|| ".".to_string());
 
+    let scrollback_lines = cfg.terminal.scrollback_lines as usize;
     let mut app = App::new(
         cfg.auth.psk.clone(),
         ws_state,
@@ -1648,6 +1711,7 @@ fn main() -> io::Result<()> {
         cfg.tools.clone(),
         completion_timeout,
         repo_root.clone(),
+        scrollback_lines,
     );
 
     // Dispatch slot 0 (Alpha) with claude on startup (dispatch-bgz.6).
@@ -1660,7 +1724,7 @@ fn main() -> io::Result<()> {
     let claude_cmd = app.tool_cmd("claude-code").to_string();
     if let Some(mut slot) = dispatch_slot(
         0, "claude-code", &claude_cmd, pane_rows, pane_cols,
-        startup_worktree.as_deref(),
+        startup_worktree.as_deref(), app.scrollback_lines,
     ) {
         // dispatch-1lc.3: task lifecycle via .dispatch/tasks.md
         if let Some(id) = &startup_task_id {
@@ -1747,6 +1811,7 @@ fn main() -> io::Result<()> {
                 slot.last_screen_hash = hash;
                 slot.last_output_at = now;
                 slot.idle_since = None;
+                slot.scroll_offset = 0; // dispatch-ct2.4: snap to live on new output
             }
 
             // Layer 1: idle prompt detection with 500ms debounce.
@@ -1827,7 +1892,7 @@ fn main() -> io::Result<()> {
                         if app.slots[g].is_none() {
                             let cmd = app.tool_cmd("claude-code").to_string();
                             if let Some(s) = dispatch_slot(
-                                g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None,
+                                g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None, app.scrollback_lines,
                             ) {
                                 let name = s.display_name().to_string();
                                 app.slots[g] = Some(s);
@@ -1912,6 +1977,7 @@ fn main() -> io::Result<()> {
                     resize_all_slots(
                         &mut app.slots,
                         PtySize { rows: new_pane_rows, cols: new_pane_cols, pixel_width: 0, pixel_height: 0 },
+                        app.scrollback_lines,
                     );
                 }
 
@@ -2004,7 +2070,7 @@ fn main() -> io::Result<()> {
                                                 if app.slots[g].is_none() {
                                                     let cmd = app.tool_cmd("claude-code").to_string();
                                                     if let Some(slot) = dispatch_slot(
-                                                        g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None,
+                                                        g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None, app.scrollback_lines,
                                                     ) {
                                                         let name = slot.display_name().to_string();
                                                         app.push_ticker(format!("DISPATCH: {} launched in slot {}", name, g + 1));
@@ -2119,7 +2185,7 @@ fn main() -> io::Result<()> {
                                     if let Some(g) = app.slots.iter().position(|s| s.is_none()) {
                                         let cmd = app.tool_cmd("claude-code").to_string();
                                         if let Some(slot) = dispatch_slot(
-                                            g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None,
+                                            g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None, app.scrollback_lines,
                                         ) {
                                             let page = g / SLOTS_PER_PAGE;
                                             let local = g % SLOTS_PER_PAGE;
@@ -2154,9 +2220,47 @@ fn main() -> io::Result<()> {
                                     }
                                 }
 
+                                // Scrollback navigation (dispatch-ct2.4)
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    let target_g = app.target_global();
+                                    if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                        let max_scroll = {
+                                            let mut parser = slot.screen.lock().unwrap();
+                                            parser.set_scrollback(usize::MAX);
+                                            let max = parser.screen().scrollback();
+                                            parser.set_scrollback(0);
+                                            max
+                                        };
+                                        let half_page = (app.pane_rows as usize / 2).max(1);
+                                        slot.scroll_offset = (slot.scroll_offset + half_page).min(max_scroll);
+                                    }
+                                }
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    let target_g = app.target_global();
+                                    if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                        let half_page = (app.pane_rows as usize / 2).max(1);
+                                        slot.scroll_offset = slot.scroll_offset.saturating_sub(half_page);
+                                    }
+                                }
+                                KeyCode::Char('G') => {
+                                    let target_g = app.target_global();
+                                    if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                        slot.scroll_offset = 0;
+                                    }
+                                }
+
                                 KeyCode::Char('t') => {
                                     app.task_list_data = fetch_task_list_from_file(&app.repo_root, &app.slots);
                                     app.overlay = Overlay::TaskList;
+                                }
+                                // Prune completed tasks (dispatch-ct2.9)
+                                KeyCode::Char('P') => {
+                                    let n = prune_completed_tasks(&app.repo_root);
+                                    if n > 0 {
+                                        app.push_ticker(format!("PRUNED: {} completed task{} removed from tasks.md", n, if n == 1 { "" } else { "s" }));
+                                    } else {
+                                        app.push_ticker("PRUNE: no completed tasks to remove".to_string());
+                                    }
                                 }
                                 KeyCode::Char('p') => app.psk_expanded = !app.psk_expanded,
                                 KeyCode::Char('?') => app.overlay = Overlay::Help,

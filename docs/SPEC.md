@@ -628,11 +628,15 @@ While in input mode, `Escape` is the only key intercepted by the console. Everyt
 | `Shift+Tab`       | Cycle target backward across all pages                       |
 | `]` / `Shift+Right` | Next page                                                 |
 | `[` / `Shift+Left`  | Previous page                                             |
+| `k` / `Up`        | Scroll up half a page in targeted pane's scrollback          |
+| `j` / `Down`      | Scroll down half a page toward live output                   |
+| `G`               | Snap to live output (exit scrollback)                        |
 | `n`               | Dispatch new agent (prompts for tool, fills first empty slot across all pages) |
 | `N`               | Dispatch new agent into a specific slot (prompts for slot number) |
 | `x`               | Terminate agent in currently targeted slot (confirms first)  |
 | `R`               | Rename agent in currently targeted slot                      |
 | `t`               | Show task list overlay (plan, active, queued, completed)             |
+| `P`               | Prune completed tasks from `.dispatch/tasks.md`              |
 | `p`               | Show/hide full PSK                                           |
 | `q`               | Quit (confirms if agents are running)                        |
 | `?`               | Toggle help overlay                                          |
@@ -651,7 +655,7 @@ let pty = portable_pty::native_pty_system().open_pty(PtySize { rows: 24, cols: 8
 let child = pty.slave.spawn_command(CommandBuilder::new("claude"))?;
 let reader = pty.master.try_clone_reader()?;
 let writer = pty.master.take_writer()?;
-let vte = vt100::Parser::new(24, 80, 0); // rows, cols, scrollback
+let vte = vt100::Parser::new(24, 80, scrollback_lines); // rows, cols, scrollback
 ```
 
 **Output processing:**
@@ -973,12 +977,12 @@ Radio:
 - mDNS/Zeroconf console discovery.
 - QR code pairing in console TUI.
 - ~~Continuous listening mode with voice-activity detection.~~ (done)
-- Terminal scrollback in panes.
-- Agent busy/idle detection: refine idle prompt patterns and completion timeout per tool as edge cases surface in testing.
+- ~~Terminal scrollback in panes.~~ (done)
+- ~~Agent busy/idle detection: refine idle prompt patterns and completion timeout per tool as edge cases surface in testing.~~ (done)
 - TLS on the WebSocket.
 - AccessibilityService for screen-off volume button capture.
 - Console prompt history and logging.
-- `.dispatch/tasks.md` pruning for long-running projects (archive completed tasks).
+- ~~`.dispatch/tasks.md` pruning for long-running projects (archive completed tasks).~~ (done)
 - Wear OS companion: minimal wrist app (`radio/wear/` module) with status glance (connection state, current target, active agents), crown rotation for target cycling, and tap-to-dispatch trigger. Standalone APK, same WebSocket protocol as the phone radio. Settings (host, port, PSK) via long-press.
 
 ---
