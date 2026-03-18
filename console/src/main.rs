@@ -16,6 +16,7 @@
 // dispatch-bgz.11: standby pane (empty slot display + queued task list)
 // dispatch-bgz.12: config file and CLI subcommands
 // dispatch-ami: LED-style scrolling ticker line between header and panes
+// dispatch-1lc.2: idle agent pickup — idle prompt detection, inactivity timeout, auto task pickup
 //
 // Layout:
 //   Header bar  : DISPATCH title, radio state, PSK, agent count, PAGE X/Y, clock
@@ -32,6 +33,8 @@ mod ws_server;
 
 use clap::{Parser, Subcommand};
 use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
     io::{self, Read, Write},
     process::Command,
     sync::{
@@ -142,6 +145,10 @@ struct SlotState {
     child_pid: Option<u32>,
     // Keep master alive for resize (dispatch-bgz.6)
     master: Box<dyn portable_pty::MasterPty>,
+    // Task completion detection (dispatch-1lc.2)
+    last_output_at: Instant,     // when screen content last changed
+    last_screen_hash: u64,       // hash of screen to detect changes
+    idle_since: Option<Instant>, // when idle prompt was first seen (for 500ms debounce)
 }
 
 impl SlotState {
@@ -175,6 +182,7 @@ struct App {
     pane_rows: u16,
     pane_cols: u16,
     tools: std::collections::HashMap<String, String>,
+    completion_timeout: Duration,
     // Ticker (dispatch-ami): LED-style scrolling marquee
     ticker_queue: std::collections::VecDeque<String>,
     ticker_current: String,
@@ -189,6 +197,7 @@ impl App {
         pane_rows: u16,
         pane_cols: u16,
         tools: std::collections::HashMap<String, String>,
+        completion_timeout: Duration,
     ) -> Self {
         App {
             slots: std::array::from_fn(|_| None),
@@ -206,6 +215,7 @@ impl App {
             pane_rows,
             pane_cols,
             tools,
+            completion_timeout,
             ticker_queue: std::collections::VecDeque::new(),
             ticker_current: String::new(),
             ticker_offset: 0,
@@ -407,18 +417,22 @@ fn dispatch_slot(
     let callsign = NATO[global_idx % NATO.len()].to_string();
     let wall = Local::now().format("%H:%M").to_string();
 
+    let now = Instant::now();
     Some(SlotState {
         callsign,
         custom_name: None,
         tool: tool_key.to_string(),
         task_id: None,
-        dispatch_time: Instant::now(),
+        dispatch_time: now,
         dispatch_wall_str: wall,
         screen,
         writer,
         child_exited,
         child_pid,
         master: pair.master,
+        last_output_at: now,
+        last_screen_hash: 0,
+        idle_since: None,
     })
 }
 
@@ -540,6 +554,47 @@ fn bd_fetch_queued() -> Vec<QueuedTask> {
             Some(QueuedTask { id, title })
         })
         .collect()
+}
+
+// ── task completion detection (dispatch-1lc.2) ────────────────────────────────
+
+/// Extract the text content of a single screen row, trimming trailing spaces.
+fn screen_row_text(screen: &vt100::Screen, row: u16) -> String {
+    let mut s = String::new();
+    for col in 0..screen.size().1 {
+        if let Some(cell) = screen.cell(row, col) {
+            let ch = cell.contents();
+            s.push_str(if ch.is_empty() { " " } else { &ch });
+        }
+    }
+    s.trim_end().to_string()
+}
+
+/// Hash all screen content to detect changes without storing the full buffer.
+fn compute_screen_hash(screen: &vt100::Screen) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for row in 0..screen.size().0 {
+        screen_row_text(screen, row).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Return true if the last non-blank row of the screen matches the idle prompt
+/// pattern for the given tool.
+///
+/// claude-code idle: last non-blank row is exactly ">" or "> "
+fn is_idle_prompt(screen: &vt100::Screen, tool: &str) -> bool {
+    if tool != "claude-code" {
+        return false;
+    }
+    let (rows, _) = screen.size();
+    for r in (0..rows).rev() {
+        let text = screen_row_text(screen, r);
+        if !text.is_empty() {
+            return text == ">" || text == "> ";
+        }
+    }
+    false
 }
 
 fn key_to_pty_bytes(key: &KeyEvent) -> Vec<u8> {
@@ -1183,12 +1238,14 @@ fn main() -> io::Result<()> {
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((160, 40));
     let (pane_rows, pane_cols) = compute_pane_size(term_rows, term_cols);
 
+    let completion_timeout = Duration::from_secs(cfg.beads.completion_timeout_secs as u64);
     let mut app = App::new(
         cfg.auth.psk.clone(),
         ws_state,
         pane_rows,
         pane_cols,
         cfg.tools.clone(),
+        completion_timeout,
     );
 
     // Dispatch slot 0 (Alpha) with claude on startup (dispatch-bgz.6).
@@ -1239,6 +1296,78 @@ fn main() -> io::Result<()> {
                         app.push_ticker(format!("AGENT EXITED: {} (slot {}) — standby", callsign, i + 1));
                     }
                 }
+            }
+        }
+
+        // Idle agent pickup: detect task completion via idle prompt or inactivity
+        // timeout, then assign the next queued task (dispatch-1lc.2).
+        let now = Instant::now();
+        let mut completed: Vec<(usize, String)> = Vec::new();
+        for i in 0..MAX_SLOTS {
+            let slot = match app.slots[i].as_mut() {
+                Some(s) if s.task_id.is_some() => s,
+                _ => continue,
+            };
+
+            // Update screen hash to track last output time.
+            let hash = {
+                let parser = slot.screen.lock().unwrap();
+                compute_screen_hash(parser.screen())
+            };
+            if hash != slot.last_screen_hash {
+                slot.last_screen_hash = hash;
+                slot.last_output_at = now;
+                slot.idle_since = None;
+            }
+
+            // Layer 1: idle prompt detection with 500ms debounce.
+            let idle_prompt = {
+                let parser = slot.screen.lock().unwrap();
+                is_idle_prompt(parser.screen(), &slot.tool)
+            };
+            if idle_prompt {
+                match slot.idle_since {
+                    None => slot.idle_since = Some(now),
+                    Some(t) if now.duration_since(t) >= Duration::from_millis(500) => {
+                        completed.push((i, slot.task_id.clone().unwrap()));
+                    }
+                    _ => {}
+                }
+            } else {
+                slot.idle_since = None;
+            }
+
+            // Layer 2: inactivity timeout.
+            if app.completion_timeout.as_secs() > 0
+                && now.duration_since(slot.last_output_at) >= app.completion_timeout
+                && slot.idle_since.is_none() // avoid double-completing
+                && !completed.iter().any(|(idx, _)| *idx == i)
+            {
+                completed.push((i, slot.task_id.clone().unwrap()));
+            }
+        }
+
+        for (i, task_id) in completed {
+            if let Some(slot) = app.slots[i].as_mut() {
+                slot.task_id = None;
+                slot.idle_since = None;
+            }
+            bd_close_task(&task_id);
+
+            // Pick up next available queued task and assign it to the idle slot.
+            let next = bd_fetch_queued().into_iter().next();
+            if let Some(qt) = next {
+                if let Some(slot) = app.slots[i].as_mut() {
+                    let callsign = slot.callsign.clone();
+                    if bd_assign_task(&qt.id, &callsign) {
+                        let prompt = format!("[Dispatch task {}] {}\r", qt.id, qt.title);
+                        let _ = slot.writer.write_all(prompt.as_bytes());
+                        let _ = slot.writer.flush();
+                        slot.task_id = Some(qt.id.clone());
+                        slot.last_output_at = Instant::now();
+                    }
+                }
+                app.queued_tasks.retain(|t| t.id != qt.id);
             }
         }
 
