@@ -103,6 +103,7 @@ The console displays four agent panes at a time in a 2x2 grid with a scrolling t
 | `1`-`4`           | Select target slot on current page                  |
 | `Tab`             | Cycle target forward across all agents              |
 | `]` / `[`         | Next / previous page                                |
+| `PgUp` / `PgDn`   | Scroll pane output up/down                          |
 | `n`               | Dispatch new agent into first empty slot            |
 | `x`               | Terminate agent in targeted slot                    |
 | `R`               | Rename agent in targeted slot                       |
