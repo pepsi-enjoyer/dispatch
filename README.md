@@ -76,7 +76,7 @@ The PSK is displayed in the console header bar. You'll need it to connect the ra
 
 1. Open the `radio/` directory in Android Studio.
 2. Build and install the app on your Android device.
-3. Enter the console's IP address and PSK in the radio's settings screen.
+3. Open Settings and tap **DISCOVER CONSOLE** to auto-detect the console on your network, or enter the IP address manually. Enter the PSK shown in the console header bar.
 
 ## Usage
 
@@ -148,6 +148,7 @@ Simple one-off prompts skip the planning step and dispatch directly.
 - **NATO callsigns** -- agents are assigned Alpha, Bravo, Charlie, ... in dispatch order. Addressable by voice from any page.
 - **Paged layout** -- up to 26 agents across 7 pages. Off-screen agents keep running and are still addressable.
 - **Clean target repo** -- all dispatch artifacts live in `.dispatch/` (gitignored). Your repo stays untouched.
+- **mDNS discovery** -- the console advertises itself on the LAN via Zeroconf. The radio can find it automatically without manual IP entry.
 - **PSK authentication** -- all WebSocket connections require a pre-shared key. Auto-generated on first run.
 - **Cross-platform** -- console runs on Windows (ConPTY), macOS, and Linux.
 

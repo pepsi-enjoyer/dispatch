@@ -330,6 +330,15 @@ The console displays task state across multiple areas:
 
 Communication happens over a single WebSocket connection. Messages are JSON. Either side can initiate messages.
 
+### mDNS / Zeroconf Discovery
+
+The console advertises itself on the local network via mDNS (DNS-SD) as a `_dispatch._tcp.local.` service. The service name is the console's hostname. The radio discovers this service using Android's `NsdManager` API, eliminating the need for manual IP entry.
+
+- **Console**: uses the `mdns-sd` crate to register the service on startup. The service is advertised on all network interfaces with automatic address detection.
+- **Radio**: the Settings screen has a "DISCOVER CONSOLE" button that scans for `_dispatch._tcp.` services for up to 5 seconds. When found, the host and port fields are auto-filled.
+
+Manual IP/port entry remains available as a fallback.
+
 ### Authentication
 
 The WebSocket handshake includes a pre-shared key as a query parameter:
@@ -441,7 +450,7 @@ Sent to the current target. The console creates a task, assigns it, and returns 
 ### Target
 
 - Rust
-- Dependencies: `ratatui`, `crossterm`, `tokio`, `tokio-tungstenite`, `serde`, `serde_json`, `toml`, `portable-pty`, `vt100`, `dirs`, `notify` (file watcher)
+- Dependencies: `ratatui`, `crossterm`, `tokio`, `tokio-tungstenite`, `serde`, `serde_json`, `toml`, `portable-pty`, `vt100`, `dirs`, `notify` (file watcher), `mdns-sd` (mDNS advertisement), `hostname`
 - Single binary, cross-platform (Windows, macOS, Linux)
 
 ### Embedded Terminals
@@ -840,7 +849,8 @@ Minimal, high-contrast, dark theme. Uppercase labels, monospaced accents.
 
 ### Settings
 
-- **Console address**: IP and port.
+- **Console discovery**: mDNS scan to auto-fill address and port.
+- **Console address**: IP and port (auto-filled by discovery or manual entry).
 - **Pre-shared key**: manual entry or QR scan.
 - **Haptic feedback**: toggle (default on).
 - **Confirm before send**: toggle (default off).
