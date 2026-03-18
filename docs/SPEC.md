@@ -38,6 +38,7 @@ dispatch/
     SPEC.md            # Full system specification
     ARCHITECTURE.md    # High-level architecture overview
     CONSOLE.md         # Console task management reference
+    ORCHESTRATOR.md    # Orchestrator behavior and decision-making
     AGENTS.md          # Template injected into agent prompts
   README.md
 ```
