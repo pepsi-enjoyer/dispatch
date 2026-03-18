@@ -647,6 +647,7 @@ While in input mode, `Escape` is the only key intercepted by the console. Everyt
 | `p`               | Show/hide full PSK                                           |
 | `Q`               | Show QR code overlay for radio pairing                       |
 | `q`               | Quit (confirms if agents are running)                        |
+| `PgUp` / `PgDn`   | Scroll pane output up/down (half-page increments)            |
 | `?`               | Toggle help overlay                                          |
 
 `Tab` / `Shift+Tab` cycle through all active agents across all pages, not just the current page. The view auto-navigates to the page containing the newly targeted agent. `1-4` always refer to the four slots on the current page -- so pressing `2` on page 2 selects slot 6 (Foxtrot).
@@ -663,12 +664,14 @@ let pty = portable_pty::native_pty_system().open_pty(PtySize { rows: 24, cols: 8
 let child = pty.slave.spawn_command(CommandBuilder::new("claude"))?;
 let reader = pty.master.try_clone_reader()?;
 let writer = pty.master.take_writer()?;
-let vte = vt100::Parser::new(24, 80, 0); // rows, cols, scrollback
+let vte = vt100::Parser::new(24, 80, 1000); // rows, cols, scrollback
 ```
 
 **Output processing:**
 
 A tokio task per slot reads from the PTY reader and feeds bytes into the `vt100::Parser`. The parser maintains a `Screen` object representing the current terminal state. The ratatui render loop reads from this screen on each frame.
+
+**Scrollback:** the `vt100::Parser` is initialized with a scrollback buffer (default 1000 lines, configurable via `terminal.scrollback_lines`). In command mode, `PgUp`/`PgDn` scroll the targeted pane by half-page increments. A `SCROLL` indicator appears when not at the bottom. Scrollback resets to the bottom on new output or when entering input mode.
 
 **Input forwarding (input mode):**
 
@@ -967,6 +970,7 @@ Console:
 - Auto-dispatch for unaddressed prompts.
 - Pane info strip: callsign, tool, task ID, dispatch time, runtime.
 - Config file with auto-generation and CLI subcommands.
+- Terminal scrollback in panes (PgUp/PgDn in command mode, configurable buffer size).
 
 Radio:
 - Single Activity with volume button overrides.
@@ -986,7 +990,7 @@ Radio:
 - mDNS/Zeroconf console discovery.
 - QR code pairing in console TUI.
 - ~~Continuous listening mode with voice-activity detection.~~ (done)
-- Terminal scrollback in panes.
+- ~~Terminal scrollback in panes.~~ (done)
 - Agent busy/idle detection: refine idle prompt patterns and completion timeout per tool as edge cases surface in testing.
 - TLS on the WebSocket.
 - AccessibilityService for screen-off volume button capture.

@@ -23,6 +23,7 @@
 // dispatch-1lc.4: task list overlay — full-screen plan view with status groups and agent assignments
 // dispatch-1lc.3: task dependencies — -> arrow syntax in .dispatch/tasks.md, dependency-aware dispatch
 // dispatch-fnx: headless planner — spawns claude -p to decompose complex prompts into task plans
+// dispatch-ct2.4: terminal scrollback in panes — PgUp/PgDn in command mode, configurable buffer
 //
 // Layout:
 //   Header bar  : DISPATCH title, radio state, PSK, agent count, PAGE X/Y, clock
@@ -158,6 +159,8 @@ struct SlotState {
     last_output_at: Instant,     // when screen content last changed
     last_screen_hash: u64,       // hash of screen to detect changes
     idle_since: Option<Instant>, // when idle prompt was first seen (for 500ms debounce)
+    // Scrollback (dispatch-ct2.4): lines scrolled back from bottom
+    scroll_offset: usize,
 }
 
 impl SlotState {
@@ -222,6 +225,8 @@ struct App {
     task_list_data: Vec<TaskEntry>,
     // Headless planner (dispatch-fnx)
     planner: Option<PlannerState>,
+    // Scrollback config (dispatch-ct2.4)
+    scrollback_lines: u32,
 }
 
 impl App {
@@ -234,6 +239,7 @@ impl App {
         tools: std::collections::HashMap<String, String>,
         completion_timeout: Duration,
         repo_root: String,
+        scrollback_lines: u32,
     ) -> Self {
         App {
             slots: std::array::from_fn(|_| None),
@@ -261,6 +267,7 @@ impl App {
             repo_root,
             task_list_data: Vec::new(),
             planner: None,
+            scrollback_lines,
         }
     }
 
@@ -402,6 +409,7 @@ fn dispatch_slot(
     pane_rows: u16,
     pane_cols: u16,
     cwd: Option<&str>,
+    scrollback_lines: u32,
 ) -> Option<SlotState> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -438,7 +446,7 @@ fn dispatch_slot(
 
     let child_pid = child.process_id();
 
-    let screen = Arc::new(Mutex::new(vt100::Parser::new(pane_rows, pane_cols, 0)));
+    let screen = Arc::new(Mutex::new(vt100::Parser::new(pane_rows, pane_cols, scrollback_lines as usize)));
     let screen_w = Arc::clone(&screen);
     let child_exited = Arc::new(AtomicBool::new(false));
     let child_exited_w = Arc::clone(&child_exited);
@@ -480,6 +488,7 @@ fn dispatch_slot(
         last_output_at: now,
         last_screen_hash: 0,
         idle_since: None,
+        scroll_offset: 0,
     })
 }
 
@@ -1252,6 +1261,7 @@ fn render_pane(
     global_idx: usize,
     app: &App,
     vt_lines: Option<Vec<Line<'static>>>,
+    scrolled: bool,
 ) {
     let is_target = app.target == local_idx;
     let border_style = if is_target {
@@ -1279,6 +1289,18 @@ fn render_pane(
 
     if let Some(lines) = vt_lines {
         f.render_widget(Paragraph::new(Text::from(lines)), chunks[1]);
+        // dispatch-ct2.4: show scroll indicator when not at bottom
+        if scrolled {
+            let indicator = Span::styled(
+                " SCROLL ",
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            );
+            let x = chunks[1].right().saturating_sub(9);
+            let y = chunks[1].bottom().saturating_sub(1);
+            if x >= chunks[1].x && y >= chunks[1].y {
+                f.render_widget(Paragraph::new(Line::from(indicator)), Rect::new(x, y, 8, 1));
+            }
+        }
     } else {
         f.render_widget(Paragraph::new(standby_body(global_idx, app)), chunks[1]);
     }
@@ -1289,14 +1311,19 @@ fn render_panes(f: &mut Frame, area: Rect, app: &App) {
     let page_start = app.current_page * SLOTS_PER_PAGE;
 
     // Pre-compute vt lines for each visible slot (hold locks briefly, then release).
+    // dispatch-ct2.4: set scrollback offset before reading, then restore to 0.
     let mut page_lines: [Option<Vec<Line<'static>>>; SLOTS_PER_PAGE] =
         [None, None, None, None];
+    let mut page_scrolled: [bool; SLOTS_PER_PAGE] = [false; SLOTS_PER_PAGE];
     for local in 0..SLOTS_PER_PAGE {
         let g = page_start + local;
         if g < MAX_SLOTS {
             if let Some(slot) = &app.slots[g] {
-                let parser = slot.screen.lock().unwrap();
+                let mut parser = slot.screen.lock().unwrap();
+                parser.set_scrollback(slot.scroll_offset);
                 page_lines[local] = Some(screen_to_lines(parser.screen()));
+                page_scrolled[local] = slot.scroll_offset > 0;
+                parser.set_scrollback(0);
             }
         }
     }
@@ -1320,7 +1347,7 @@ fn render_panes(f: &mut Frame, area: Rect, app: &App) {
     for local in 0..SLOTS_PER_PAGE {
         let g = page_start + local;
         if g < MAX_SLOTS {
-            render_pane(f, areas[local], local, g, app, page_lines[local].take());
+            render_pane(f, areas[local], local, g, app, page_lines[local].take(), page_scrolled[local]);
         }
     }
 }
@@ -1371,7 +1398,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 ),
                 Span::styled(ws_target_str, Style::default().fg(Color::Cyan)),
                 Span::styled(
-                    "│ i/Enter input │ 1-4 slot │ Tab cycle │ ]/[ page │ n/N dispatch │ x term │ R rename │ t tasks │ p psk │ q quit │ ? help",
+                    "│ i/Enter input │ 1-4 slot │ Tab cycle │ ]/[ page │ PgUp/Dn scroll │ n/N dispatch │ x term │ R rename │ t tasks │ p psk │ q quit │ ? help",
                     Style::default().fg(Color::DarkGray),
                 ),
             ])
@@ -1405,7 +1432,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn render_help_overlay(f: &mut Frame, area: Rect) {
-    let r = centered_rect(52, 23, area);
+    let r = centered_rect(52, 26, area);
     f.render_widget(Clear, r);
     let lines = vec![
         Line::from(Span::styled(
@@ -1419,6 +1446,7 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::raw("  Shift+Tab    Prev slot (all pages)")),
         Line::from(Span::raw("  ] / Shift+→  Next page")),
         Line::from(Span::raw("  [ / Shift+←  Prev page")),
+        Line::from(Span::raw("  PgUp / PgDn  Scroll pane output")),
         Line::from(Span::raw("  n            Dispatch into first empty slot")),
         Line::from(Span::raw("  N            Dispatch into specific slot")),
         Line::from(Span::raw("  x            Terminate target agent")),
@@ -2003,6 +2031,7 @@ fn main() -> io::Result<()> {
         cfg.tools.clone(),
         completion_timeout,
         repo_root.clone(),
+        cfg.terminal.scrollback_lines,
     );
 
     // Dispatch slot 0 (Alpha) with claude on startup (dispatch-bgz.6).
@@ -2015,7 +2044,7 @@ fn main() -> io::Result<()> {
     let claude_cmd = app.tool_cmd("claude-code").to_string();
     if let Some(mut slot) = dispatch_slot(
         0, "claude-code", &claude_cmd, pane_rows, pane_cols,
-        startup_worktree.as_deref(),
+        startup_worktree.as_deref(), app.scrollback_lines,
     ) {
         // dispatch-1lc.3: task lifecycle via .dispatch/tasks.md
         if let Some(id) = &startup_task_id {
@@ -2104,6 +2133,8 @@ fn main() -> io::Result<()> {
                 slot.last_screen_hash = hash;
                 slot.last_output_at = now;
                 slot.idle_since = None;
+                // dispatch-ct2.4: snap back to bottom on new output
+                slot.scroll_offset = 0;
             }
 
             // Layer 1: idle prompt detection with 500ms debounce.
@@ -2233,7 +2264,7 @@ fn main() -> io::Result<()> {
                         if app.slots[g].is_none() {
                             let cmd = app.tool_cmd("claude-code").to_string();
                             if let Some(s) = dispatch_slot(
-                                g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None,
+                                g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None, app.scrollback_lines,
                             ) {
                                 let name = s.display_name().to_string();
                                 app.slots[g] = Some(s);
@@ -2430,7 +2461,7 @@ fn main() -> io::Result<()> {
                                                 if app.slots[g].is_none() {
                                                     let cmd = app.tool_cmd("claude-code").to_string();
                                                     if let Some(slot) = dispatch_slot(
-                                                        g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None,
+                                                        g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None, app.scrollback_lines,
                                                     ) {
                                                         let name = slot.display_name().to_string();
                                                         app.push_ticker(format!("DISPATCH: {} launched in slot {}", name, g + 1));
@@ -2491,6 +2522,11 @@ fn main() -> io::Result<()> {
                                 }
 
                                 KeyCode::Enter | KeyCode::Char('i') => {
+                                    // dispatch-ct2.4: reset scroll when entering input mode
+                                    let target_g = app.target_global();
+                                    if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                        slot.scroll_offset = 0;
+                                    }
                                     app.mode = Mode::Input;
                                     app.last_was_escape = false;
                                 }
@@ -2545,7 +2581,7 @@ fn main() -> io::Result<()> {
                                     if let Some(g) = app.slots.iter().position(|s| s.is_none()) {
                                         let cmd = app.tool_cmd("claude-code").to_string();
                                         if let Some(slot) = dispatch_slot(
-                                            g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None,
+                                            g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None, app.scrollback_lines,
                                         ) {
                                             let page = g / SLOTS_PER_PAGE;
                                             let local = g % SLOTS_PER_PAGE;
@@ -2587,6 +2623,23 @@ fn main() -> io::Result<()> {
                                 KeyCode::Char('p') => app.psk_expanded = !app.psk_expanded,
                                 KeyCode::Char('Q') => app.overlay = Overlay::QrCode,
                                 KeyCode::Char('?') => app.overlay = Overlay::Help,
+
+                                // Scrollback (dispatch-ct2.4)
+                                KeyCode::PageUp => {
+                                    let target_g = app.target_global();
+                                    if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                        let half = (app.pane_rows as usize) / 2;
+                                        slot.scroll_offset = slot.scroll_offset.saturating_add(half);
+                                        // Clamp will happen in vt100's set_scrollback
+                                    }
+                                }
+                                KeyCode::PageDown => {
+                                    let target_g = app.target_global();
+                                    if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                        let half = (app.pane_rows as usize) / 2;
+                                        slot.scroll_offset = slot.scroll_offset.saturating_sub(half);
+                                    }
+                                }
 
                                 _ => {}
                             }
