@@ -29,6 +29,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var haptics: HapticFeedback
     private lateinit var volumeUpHandler: VolumeUpHandler
     private lateinit var pttManager: PushToTalkManager
+    private var continuousManager: ContinuousListenManager? = null
     private lateinit var wsClient: RadioWebSocketClient
 
     // App state synced from console
@@ -42,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvTarget: TextView
     private lateinit var tvTargetDetail: TextView
     private lateinit var flListening: View
+    private lateinit var tvListeningLabel: TextView
     private lateinit var tvPartial: TextView
     private lateinit var audioLevelView: AudioLevelView
     private lateinit var tvLastDispatch: TextView
@@ -84,6 +86,7 @@ class MainActivity : AppCompatActivity() {
             onListeningStart = {
                 haptics.listeningStart()
                 wsClient.send("""{"type":"radio_status","state":"listening"}""")
+                tvListeningLabel.text = "LISTENING"
                 flListening.visibility = View.VISIBLE
                 tvPartial.text = ""
                 audioLevelView.level = 0f
@@ -109,11 +112,45 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
+        initContinuousManager()
         initWebSocket()
 
         findViewById<android.widget.Button>(R.id.btn_settings).setOnClickListener {
             startActivityForResult(Intent(this, SettingsActivity::class.java), SETTINGS_REQUEST)
         }
+    }
+
+    private fun initContinuousManager() {
+        continuousManager?.destroy()
+        continuousManager = ContinuousListenManager(
+            context = this,
+            locale = settings.speechLocale,
+            onListeningStart = {
+                wsClient.send("""{"type":"radio_status","state":"listening"}""")
+                tvListeningLabel.text = "CONTINUOUS"
+                flListening.visibility = View.VISIBLE
+                tvPartial.text = ""
+            },
+            onPartialResult = { partial ->
+                tvPartial.text = partial
+            },
+            onFinalResult = { transcript ->
+                haptics.sendConfirm()
+                tvPartial.text = ""
+                audioLevelView.level = 0f
+                handleTranscript(transcript)
+                // Listening panel stays visible — recognizer auto-restarts
+            },
+            onEmptyTranscript = {
+                // No speech in this cycle — recognizer auto-restarts, no action needed
+            },
+            onError = {
+                // Recoverable — recognizer auto-restarts
+            },
+            onRmsChanged = { level ->
+                audioLevelView.level = level
+            }
+        )
     }
 
     private fun bindViews() {
@@ -122,6 +159,7 @@ class MainActivity : AppCompatActivity() {
         tvTarget = findViewById(R.id.tv_target)
         tvTargetDetail = findViewById(R.id.tv_target_detail)
         flListening = findViewById(R.id.fl_listening)
+        tvListeningLabel = findViewById(R.id.tv_listening_label)
         tvPartial = findViewById(R.id.tv_partial)
         audioLevelView = findViewById(R.id.audio_level_view)
         tvLastDispatch = findViewById(R.id.tv_last_dispatch)
@@ -155,8 +193,14 @@ class MainActivity : AppCompatActivity() {
         return when (keyCode) {
             KeyEvent.KEYCODE_VOLUME_UP -> volumeUpHandler.onKeyDown(agents, currentSlot)
             KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                if (event.repeatCount == 0) pttManager.startListening()
-                true // suppress system volume UI
+                if (event.repeatCount == 0) {
+                    if (settings.continuousListening) {
+                        toggleContinuousListening()
+                    } else {
+                        pttManager.startListening()
+                    }
+                }
+                true
             }
             else -> super.onKeyDown(keyCode, event)
         }
@@ -166,10 +210,26 @@ class MainActivity : AppCompatActivity() {
         return when (keyCode) {
             KeyEvent.KEYCODE_VOLUME_UP -> volumeUpHandler.onKeyUp(agents, currentSlot)
             KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                pttManager.stopListening()
-                true // suppress system volume UI
+                if (!settings.continuousListening) {
+                    pttManager.stopListening()
+                }
+                true
             }
             else -> super.onKeyUp(keyCode, event)
+        }
+    }
+
+    private fun toggleContinuousListening() {
+        val manager = continuousManager ?: return
+        if (manager.isActive) {
+            manager.stop()
+            haptics.sendConfirm()
+            flListening.visibility = View.INVISIBLE
+            audioLevelView.level = 0f
+            wsClient.send("""{"type":"radio_status","state":"idle"}""")
+        } else {
+            haptics.listeningStart()
+            manager.start()
         }
     }
 
@@ -310,6 +370,7 @@ class MainActivity : AppCompatActivity() {
             // Reconnect with new settings
             wsClient.disconnect()
             pttManager.destroy()
+            continuousManager?.destroy()
             initWebSocket()
             pttManager = PushToTalkManager(
                 context = this,
@@ -317,6 +378,7 @@ class MainActivity : AppCompatActivity() {
                 onListeningStart = {
                     haptics.listeningStart()
                     wsClient.send("""{"type":"radio_status","state":"listening"}""")
+                    tvListeningLabel.text = "LISTENING"
                     flListening.visibility = View.VISIBLE
                     tvPartial.text = ""
                 },
@@ -337,12 +399,14 @@ class MainActivity : AppCompatActivity() {
                     wsClient.send("""{"type":"radio_status","state":"idle"}""")
                 }
             )
+            initContinuousManager()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         pttManager.destroy()
+        continuousManager?.destroy()
         wsClient.disconnect()
     }
 }

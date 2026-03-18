@@ -119,8 +119,11 @@ The console displays four agent panes at a time in a 2x2 grid with a scrolling t
 |------------------------|-----------------------------------------------------|
 | Volume Down (hold)     | Push-to-talk: speak a command or prompt             |
 | Volume Down (release)  | Send transcript to console                          |
+| Volume Down (tap)      | Toggle continuous listening (when enabled in settings) |
 | Volume Up              | Cycle to next active agent                          |
 | Volume Up (hold >1s)   | Quick dispatch: pick and launch a new agent type    |
+
+**Continuous listening mode** -- enable in settings to stay in listen mode without holding Volume Down. Uses voice-activity detection to automatically detect speech start and end. Volume Down becomes a toggle instead of push-to-talk.
 
 ### Watch
 

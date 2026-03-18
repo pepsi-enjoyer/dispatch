@@ -846,6 +846,7 @@ Minimal, high-contrast, dark theme. Uppercase labels, monospaced accents.
 - **Confirm before send**: toggle (default off).
 - **Keep screen on**: toggle (default on).
 - **Language**: speech recognition locale (default `en-AU`).
+- **Continuous listening**: toggle (default off). When enabled, Volume Down toggles continuous listening on/off instead of push-to-talk. Uses SpeechRecognizer's built-in silence detection as VAD.
 
 ### Speech Recognition
 
@@ -853,7 +854,21 @@ Minimal, high-contrast, dark theme. Uppercase labels, monospaced accents.
 - `EXTRA_PARTIAL_RESULTS` enabled.
 - `EXTRA_LANGUAGE` set to configured locale.
 - Offline recognition preferred, cloud fallback.
-- No timeout while volume down is held.
+- No timeout while volume down is held (PTT mode).
+
+### Continuous Listening Mode
+
+When the "Continuous Listening (VAD)" setting is enabled:
+
+- **Volume Down** acts as a toggle: tap to start continuous listening, tap again to stop.
+- SpeechRecognizer's silence detection acts as voice-activity detection (VAD):
+  - `EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS`: 1500 ms
+  - `EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS`: 1000 ms
+  - `EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS`: 500 ms
+- After each utterance is processed, recognition auto-restarts after a 300 ms delay.
+- The listening panel shows "CONTINUOUS" instead of "LISTENING" to indicate the mode.
+- `onRmsChanged` drives the `AudioLevelView` bar with real audio levels.
+- No-speech timeouts and errors trigger automatic restart rather than stopping.
 
 ### Code Vocabulary Accuracy
 
@@ -957,7 +972,7 @@ Radio:
 
 - mDNS/Zeroconf console discovery.
 - QR code pairing in console TUI.
-- Continuous listening mode with voice-activity detection.
+- ~~Continuous listening mode with voice-activity detection.~~ (done)
 - Terminal scrollback in panes.
 - Agent busy/idle detection: refine idle prompt patterns and completion timeout per tool as edge cases surface in testing.
 - TLS on the WebSocket.

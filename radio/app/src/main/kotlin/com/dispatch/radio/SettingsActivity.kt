@@ -33,6 +33,7 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var cbHaptic: CheckBox
     private lateinit var cbConfirm: CheckBox
     private lateinit var cbScreenOn: CheckBox
+    private lateinit var cbContinuous: CheckBox
     private lateinit var btnSave: Button
     private lateinit var btnScanQr: Button
 
@@ -66,6 +67,7 @@ class SettingsActivity : AppCompatActivity() {
         cbHaptic = findViewById(R.id.cb_haptic)
         cbConfirm = findViewById(R.id.cb_confirm)
         cbScreenOn = findViewById(R.id.cb_screen_on)
+        cbContinuous = findViewById(R.id.cb_continuous)
         btnSave = findViewById(R.id.btn_save)
         btnScanQr = findViewById(R.id.btn_scan_qr)
 
@@ -97,6 +99,7 @@ class SettingsActivity : AppCompatActivity() {
         cbHaptic.isChecked = settings.hapticEnabled
         cbConfirm.isChecked = settings.confirmBeforeSend
         cbScreenOn.isChecked = settings.keepScreenOn
+        cbContinuous.isChecked = settings.continuousListening
     }
 
     private fun saveSettings() {
@@ -107,6 +110,7 @@ class SettingsActivity : AppCompatActivity() {
         settings.hapticEnabled = cbHaptic.isChecked
         settings.confirmBeforeSend = cbConfirm.isChecked
         settings.keepScreenOn = cbScreenOn.isChecked
+        settings.continuousListening = cbContinuous.isChecked
 
         // Apply keep screen on immediately
         if (settings.keepScreenOn) {

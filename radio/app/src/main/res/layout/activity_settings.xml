@@ -161,6 +161,16 @@
             android:textColor="@color/white"
             android:fontFamily="monospace"
             android:buttonTint="@color/cyan"
+            android:layout_marginBottom="12dp" />
+
+        <CheckBox
+            android:id="@+id/cb_continuous"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="CONTINUOUS LISTENING (VAD)"
+            android:textColor="@color/white"
+            android:fontFamily="monospace"
+            android:buttonTint="@color/cyan"
             android:layout_marginBottom="32dp" />
 
         <Button

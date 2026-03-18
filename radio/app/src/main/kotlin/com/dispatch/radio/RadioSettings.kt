@@ -39,6 +39,10 @@ class RadioSettings(context: Context) {
         get() = prefs.getString(KEY_LOCALE, DEFAULT_LOCALE) ?: DEFAULT_LOCALE
         set(value) = prefs.edit().putString(KEY_LOCALE, value).apply()
 
+    var continuousListening: Boolean
+        get() = prefs.getBoolean(KEY_CONTINUOUS, false)
+        set(value) = prefs.edit().putBoolean(KEY_CONTINUOUS, value).apply()
+
     companion object {
         private const val PREFS_NAME = "dispatch_radio"
         private const val KEY_HOST = "console_host"
@@ -48,6 +52,7 @@ class RadioSettings(context: Context) {
         private const val KEY_CONFIRM = "confirm_before_send"
         private const val KEY_SCREEN_ON = "keep_screen_on"
         private const val KEY_LOCALE = "speech_locale"
+        private const val KEY_CONTINUOUS = "continuous_listening"
         private const val DEFAULT_HOST = "192.168.1.1"
         private const val DEFAULT_PORT = 9800
         private const val DEFAULT_LOCALE = "en-AU"
