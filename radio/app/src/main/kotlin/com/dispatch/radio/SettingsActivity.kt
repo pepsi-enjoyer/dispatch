@@ -8,6 +8,7 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -15,6 +16,7 @@ import androidx.core.content.ContextCompat
 /**
  * Settings screen (dispatch-88k.7).
  *
+ * - mDNS console discovery (dispatch-ct2.1)
  * - Console IP + port
  * - Pre-shared key (manual entry or QR scan)
  * - Haptic feedback toggle (default on)
@@ -25,6 +27,7 @@ import androidx.core.content.ContextCompat
 class SettingsActivity : AppCompatActivity() {
 
     private lateinit var settings: RadioSettings
+    private lateinit var discovery: ConsoleDiscovery
 
     private lateinit var etHost: EditText
     private lateinit var etPort: EditText
@@ -36,6 +39,8 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var cbContinuous: CheckBox
     private lateinit var btnSave: Button
     private lateinit var btnScanQr: Button
+    private lateinit var btnDiscover: Button
+    private lateinit var tvDiscoverStatus: TextView
 
     private val qrScanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -59,6 +64,7 @@ class SettingsActivity : AppCompatActivity() {
         setContentView(R.layout.activity_settings)
 
         settings = RadioSettings(this)
+        discovery = ConsoleDiscovery(this)
 
         etHost = findViewById(R.id.et_host)
         etPort = findViewById(R.id.et_port)
@@ -70,11 +76,41 @@ class SettingsActivity : AppCompatActivity() {
         cbContinuous = findViewById(R.id.cb_continuous)
         btnSave = findViewById(R.id.btn_save)
         btnScanQr = findViewById(R.id.btn_scan_qr)
+        btnDiscover = findViewById(R.id.btn_discover)
+        tvDiscoverStatus = findViewById(R.id.tv_discover_status)
 
         loadSettings()
 
         btnSave.setOnClickListener { saveSettings() }
         btnScanQr.setOnClickListener { onScanQrClicked() }
+        btnDiscover.setOnClickListener { onDiscoverClicked() }
+    }
+
+    private fun onDiscoverClicked() {
+        tvDiscoverStatus.text = "SCANNING..."
+        btnDiscover.isEnabled = false
+        discovery.startDiscovery(object : ConsoleDiscovery.Listener {
+            override fun onConsoleFound(console: ConsoleDiscovery.Console) {
+                discovery.stopDiscovery()
+                etHost.setText(console.host)
+                etPort.setText(console.port.toString())
+                tvDiscoverStatus.text = "FOUND: ${console.name} (${console.host}:${console.port})"
+                btnDiscover.isEnabled = true
+            }
+
+            override fun onDiscoveryStopped() {
+                btnDiscover.isEnabled = true
+            }
+        })
+
+        // Timeout after 5 seconds if nothing found
+        etHost.postDelayed({
+            if (!btnDiscover.isEnabled) {
+                discovery.stopDiscovery()
+                tvDiscoverStatus.text = "NO CONSOLE FOUND"
+                btnDiscover.isEnabled = true
+            }
+        }, 5000)
     }
 
     private fun onScanQrClicked() {
@@ -100,6 +136,11 @@ class SettingsActivity : AppCompatActivity() {
         cbConfirm.isChecked = settings.confirmBeforeSend
         cbScreenOn.isChecked = settings.keepScreenOn
         cbContinuous.isChecked = settings.continuousListening
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        discovery.stopDiscovery()
     }
 
     private fun saveSettings() {

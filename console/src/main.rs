@@ -32,6 +32,7 @@
 // All PTYs run regardless of visible page. Each slot owns its own PTY.
 
 mod config;
+mod mdns;
 mod protocol;
 mod ws_server;
 
@@ -1621,6 +1622,9 @@ fn main() -> io::Result<()> {
                 .block_on(ws_server::run_server(state, port, psk));
         });
     }
+
+    // Advertise via mDNS so the radio can discover us (dispatch-ct2.1).
+    let _mdns = mdns::advertise(cfg.server.port);
 
     // Determine initial pane size from the terminal.
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((160, 40));
