@@ -1033,13 +1033,8 @@ Radio:
 - ~~Continuous listening mode with voice-activity detection.~~ (done)
 - ~~Terminal scrollback in panes.~~ (done)
 - Agent busy/idle detection: refine idle prompt patterns and completion timeout per tool as edge cases surface in testing.
-<<<<<<< HEAD
-- TLS on the WebSocket.
-- ~~AccessibilityService for screen-off volume button capture.~~ (done)
-=======
 - ~~TLS on the WebSocket.~~ (done)
-- AccessibilityService for screen-off volume button capture.
->>>>>>> dispatch-ct2.6
+- ~~AccessibilityService for screen-off volume button capture.~~ (done)
 - Console prompt history and logging.
 - `.dispatch/tasks.md` pruning for long-running projects (archive completed tasks).
 - Wear OS companion: minimal wrist app (`radio/wear/` module) with status glance (connection state, current target, active agents), crown rotation for target cycling, and tap-to-dispatch trigger. Standalone APK, same WebSocket protocol as the phone radio. Settings (host, port, PSK) via long-press.

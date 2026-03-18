@@ -192,6 +192,7 @@ struct SlotState {
     tool: String,
     task_id: Option<String>,
     worktree_path: Option<String>, // git worktree path for this task (dispatch-xje)
+    repo_name: String,             // short repo dir name for grid header (dispatch-2dc)
     dispatch_time: Instant,
     dispatch_wall_str: String,
     // PTY
@@ -466,6 +467,14 @@ impl App {
     }
 }
 
+/// Extract the short directory name from a repo root path (dispatch-2dc).
+fn repo_name_from_path(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+}
+
 // ── PTY helpers (dispatch-bgz.2, dispatch-bgz.6) ──────────────────────────────
 
 /// Open a PTY and spawn a process. Returns a SlotState on success.
@@ -478,6 +487,7 @@ fn dispatch_slot(
     pane_cols: u16,
     cwd: Option<&str>,
     scrollback_lines: u32,
+    repo_name: &str,
 ) -> Option<SlotState> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -546,6 +556,7 @@ fn dispatch_slot(
         tool: tool_key.to_string(),
         task_id: None,
         worktree_path: None,
+        repo_name: repo_name.to_string(),
         dispatch_time: now,
         dispatch_wall_str: wall,
         screen,
@@ -930,11 +941,7 @@ fn dispatch_plan_tasks(app: &mut App) -> usize {
             let worktree = create_worktree(&task.id, &repo_root);
             if let Some(slot) = dispatch_slot(
                 slot_idx, "claude-code", &tool_cmd, pane_rows, pane_cols,
-<<<<<<< HEAD
                 worktree.as_deref(), scrollback,
-=======
-                worktree.as_deref(), app.scrollback_lines,
->>>>>>> dispatch-ct2.6
             ) {
                 app.slots[slot_idx] = Some(slot);
             } else {
@@ -1267,6 +1274,10 @@ fn pane_info_strip(global_idx: usize, local_idx: usize, app: &App) -> Text<'stat
                     Style::default().fg(Color::DarkGray),
                 ),
                 task_span,
+                Span::styled(
+                    format!(" | {}", agent.repo_name),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]);
             let runtime = format_runtime(agent.dispatch_time.elapsed());
             let line3 = Line::from(Span::styled(
