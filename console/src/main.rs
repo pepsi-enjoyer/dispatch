@@ -19,6 +19,7 @@
 // dispatch-1lc.1: task queuing — auto-dispatch unaddressed prompts from radio
 // dispatch-1lc.2: idle agent pickup — idle prompt detection, inactivity timeout, auto task pickup
 // dispatch-xje: git worktree-per-task isolation
+// dispatch-1lc.3: task dependencies — -> arrow syntax in .dispatch/tasks.md, file-based task ops
 // dispatch-1lc.4: task list overlay — full-screen plan view with status groups and agent assignments
 //
 // Layout:
@@ -173,8 +174,9 @@ struct QueuedTask {
 struct TaskEntry {
     id: String,
     title: String,
-    status: String,      // "open", "in_progress", "closed"
+    status: String,        // "open", "in_progress", "closed"
     agent: Option<String>, // agent display name if currently in a slot
+    deps: Vec<String>,     // dependency IDs from -> arrows (dispatch-1lc.3)
 }
 
 struct App {
@@ -521,102 +523,213 @@ fn is_valid_callsign(name: &str) -> bool {
     !RESERVED_CALLSIGNS.contains(&upper.as_str())
 }
 
-fn bd_create_task(prompt: &str) -> Option<String> {
-    let output = Command::new("bd")
-        .args(["create", prompt, "-t", "task", "--json"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+// ── .dispatch/tasks.md parsing (dispatch-1lc.3) ─────────────────────────────
+//
+// Task format:
+//   - [ ] t1: Description                    (open, no deps)
+//   - [ ] t2: Description -> t1              (open, blocked by t1)
+//   - [~] t3: Description | agent: Alpha     (in progress)
+//   - [x] t4: Description                    (done)
+//
+// A task is "ready" when status is [ ] and all -> deps are [x].
+
+/// A parsed task line from .dispatch/tasks.md.
+struct ParsedTask {
+    id: String,
+    title: String,
+    status: char,           // ' ', '~', 'x'
+    deps: Vec<String>,      // task IDs from -> arrows
+    agent: Option<String>,  // from | agent: annotation
+    line_idx: usize,        // 0-based line index in the file
+    prefix: String,         // leading whitespace before "- ["
+}
+
+fn tasks_md_path(repo_root: &str) -> String {
+    format!("{}/.dispatch/tasks.md", repo_root)
+}
+
+/// Parse a single line as a task entry. Returns None if not a task line.
+fn parse_task_line(line: &str, line_idx: usize) -> Option<ParsedTask> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("- [") {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
-    v.get(0)?.get("id")?.as_str().map(|s| s.to_owned())
-}
+    let prefix = line[..line.len() - trimmed.len()].to_string();
 
-fn bd_assign_task(id: &str, callsign: &str) -> bool {
-    Command::new("bd")
-        .args([
-            "update", id, "--claim", "--assignee", callsign,
-            "--status", "in_progress", "--json",
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn bd_close_task(id: &str) -> bool {
-    Command::new("bd")
-        .args(["close", id, "--reason", "Completed", "--json"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn bd_reopen_task(id: &str) -> bool {
-    Command::new("bd")
-        .args(["update", id, "--status", "open", "--json"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn bd_fetch_queued() -> Vec<QueuedTask> {
-    let output = match Command::new("bd").args(["ready", "--json"]).output() {
-        Ok(o) => o,
-        Err(_) => return vec![],
-    };
-    if !output.status.success() {
-        return vec![];
+    // Status char: ' ', '~', or 'x'
+    let status = trimmed.as_bytes().get(3).copied()? as char;
+    if status != ' ' && status != '~' && status != 'x' {
+        return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let v: serde_json::Value = match serde_json::from_str(stdout.trim()) {
-        Ok(v) => v,
-        Err(_) => return vec![],
+    if !trimmed[4..].starts_with("] ") {
+        return None;
+    }
+
+    let rest = &trimmed[6..]; // after "- [s] "
+
+    // Task ID: everything up to ": "
+    let colon_pos = rest.find(": ")?;
+    let id = rest[..colon_pos].to_string();
+    let after_id = &rest[colon_pos + 2..];
+
+    // Split off " | agent: Name" from the end
+    let (body, agent) = match after_id.rfind(" | agent: ") {
+        Some(pos) => (
+            &after_id[..pos],
+            Some(after_id[pos + 10..].trim().to_string()),
+        ),
+        None => (after_id, None),
     };
-    v.as_array()
-        .unwrap_or(&vec![])
+
+    // Split off " -> dep1, dep2" from the end
+    let (title, deps) = match body.rfind(" -> ") {
+        Some(pos) => {
+            let dep_str = &body[pos + 4..];
+            let deps: Vec<String> = dep_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            (body[..pos].to_string(), deps)
+        }
+        None => (body.to_string(), vec![]),
+    };
+
+    Some(ParsedTask { id, title, status, deps, agent, line_idx, prefix })
+}
+
+/// Read and parse .dispatch/tasks.md. Returns (all lines, parsed tasks).
+fn parse_tasks_md(repo_root: &str) -> (Vec<String>, Vec<ParsedTask>) {
+    let path = tasks_md_path(repo_root);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return (vec![], vec![]),
+    };
+    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let mut tasks = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        if let Some(task) = parse_task_line(line, idx) {
+            tasks.push(task);
+        }
+    }
+    (lines, tasks)
+}
+
+/// Reconstruct a task line from parsed components.
+fn format_task_line(task: &ParsedTask) -> String {
+    let mut line = format!("{}- [{}] {}: {}", task.prefix, task.status, task.id, task.title);
+    if !task.deps.is_empty() {
+        line.push_str(&format!(" -> {}", task.deps.join(", ")));
+    }
+    if let Some(agent) = &task.agent {
+        line.push_str(&format!(" | agent: {}", agent));
+    }
+    line
+}
+
+/// Fetch tasks ready for dispatch: status [ ] with all -> deps marked [x].
+fn fetch_ready_tasks(repo_root: &str) -> Vec<QueuedTask> {
+    let (_, tasks) = parse_tasks_md(repo_root);
+    let done: std::collections::HashSet<&str> = tasks
         .iter()
-        .filter_map(|item| {
-            let id = item.get("id")?.as_str()?.to_owned();
-            let title = item.get("title")?.as_str()?.to_owned();
-            Some(QueuedTask { id, title })
-        })
+        .filter(|t| t.status == 'x')
+        .map(|t| t.id.as_str())
+        .collect();
+    tasks
+        .iter()
+        .filter(|t| t.status == ' ' && t.deps.iter().all(|d| done.contains(d.as_str())))
+        .map(|t| QueuedTask { id: t.id.clone(), title: t.title.clone() })
         .collect()
 }
 
-/// Fetch all tasks for the task list overlay (dispatch-1lc.4).
+/// Update a task's status and agent annotation in .dispatch/tasks.md.
+fn update_task_in_file(repo_root: &str, id: &str, new_status: char, agent: Option<&str>) -> bool {
+    let (mut lines, tasks) = parse_tasks_md(repo_root);
+    let task = match tasks.iter().find(|t| t.id == id) {
+        Some(t) => t,
+        None => return false,
+    };
+    let updated = ParsedTask {
+        id: task.id.clone(),
+        title: task.title.clone(),
+        status: new_status,
+        deps: task.deps.clone(),
+        agent: agent.map(|s| s.to_string()),
+        line_idx: task.line_idx,
+        prefix: task.prefix.clone(),
+    };
+    lines[task.line_idx] = format_task_line(&updated);
+    let path = tasks_md_path(repo_root);
+    std::fs::write(&path, lines.join("\n") + "\n").is_ok()
+}
+
+/// Create a new task entry in .dispatch/tasks.md. Returns the generated ID.
+fn create_task_in_file(repo_root: &str, prompt: &str) -> Option<String> {
+    let dispatch_dir = format!("{}/.dispatch", repo_root);
+    let _ = std::fs::create_dir_all(&dispatch_dir);
+
+    let (lines, tasks) = parse_tasks_md(repo_root);
+
+    // Next sequential ID: find highest top-level t{N} and increment.
+    let max_num = tasks
+        .iter()
+        .filter_map(|t| {
+            let num = t.id.strip_prefix('t')?;
+            if num.contains('.') { return None; }
+            num.parse::<u32>().ok()
+        })
+        .max()
+        .unwrap_or(0);
+    let new_id = format!("t{}", max_num + 1);
+    let new_line = format!("- [ ] {}: {}", new_id, prompt);
+
+    let path = tasks_md_path(repo_root);
+    let content = if lines.is_empty() {
+        format!("# Tasks\n\n{}\n", new_line)
+    } else {
+        let mut c = lines.join("\n");
+        if !c.ends_with('\n') {
+            c.push('\n');
+        }
+        c.push_str(&new_line);
+        c.push('\n');
+        c
+    };
+    std::fs::write(&path, &content).ok()?;
+    Some(new_id)
+}
+
+/// Fetch all tasks for the task list overlay (dispatch-1lc.3, dispatch-1lc.4).
 /// Cross-references with active agent slots to annotate in-progress tasks.
-fn bd_fetch_task_list(slots: &[Option<SlotState>; MAX_SLOTS]) -> Vec<TaskEntry> {
-    // Build a map of task_id -> agent display name from active slots.
-    let mut slot_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+fn fetch_task_list_from_file(
+    repo_root: &str,
+    slots: &[Option<SlotState>; MAX_SLOTS],
+) -> Vec<TaskEntry> {
+    let mut slot_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for slot in slots.iter().flatten() {
         if let Some(id) = &slot.task_id {
             slot_map.insert(id.clone(), slot.display_name().to_string());
         }
     }
 
-    let output = match Command::new("bd").args(["list", "--json"]).output() {
-        Ok(o) => o,
-        Err(_) => return vec![],
-    };
-    if !output.status.success() {
-        return vec![];
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let v: serde_json::Value = match serde_json::from_str(stdout.trim()) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
-    v.as_array()
-        .unwrap_or(&vec![])
+    let (_, tasks) = parse_tasks_md(repo_root);
+    tasks
         .iter()
-        .filter_map(|item| {
-            let id = item.get("id")?.as_str()?.to_owned();
-            let title = item.get("title")?.as_str()?.to_owned();
-            let status = item.get("status")?.as_str()?.to_owned();
-            let agent = slot_map.get(&id).cloned();
-            Some(TaskEntry { id, title, status, agent })
+        .map(|t| {
+            let status = match t.status {
+                '~' => "in_progress",
+                'x' => "closed",
+                _ => "open",
+            };
+            let agent = slot_map.get(&t.id).cloned().or_else(|| t.agent.clone());
+            TaskEntry {
+                id: t.id.clone(),
+                title: t.title.clone(),
+                status: status.to_string(),
+                agent,
+                deps: t.deps.clone(),
+            }
         })
         .collect()
 }
@@ -1287,8 +1400,13 @@ fn render_task_list_overlay(f: &mut Frame, area: Rect, app: &App) {
         )));
     } else {
         for t in &queued {
+            let dep_str = if t.deps.is_empty() {
+                String::new()
+            } else {
+                format!(" -> {}", t.deps.join(", "))
+            };
             let prefix = format!("[ ] {}  ", t.id);
-            let avail = inner_w.saturating_sub(prefix.len());
+            let avail = inner_w.saturating_sub(prefix.len() + dep_str.len());
             let title = if t.title.len() > avail && avail > 3 {
                 format!("{}...", &t.title[..avail - 3])
             } else {
@@ -1301,6 +1419,7 @@ fn render_task_list_overlay(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(title, Style::default().fg(Color::DarkGray)),
+                Span::styled(dep_str, Style::default().fg(Color::Red)),
             ]));
         }
     }
@@ -1534,7 +1653,7 @@ fn main() -> io::Result<()> {
     // Dispatch slot 0 (Alpha) with claude on startup (dispatch-bgz.6).
     // dispatch-xje: create task and worktree before spawning PTY so cwd is set.
     const PROMPT: &str = "PoC session: validate PTY + vt100 + ratatui";
-    let startup_task_id = bd_create_task(PROMPT);
+    let startup_task_id = create_task_in_file(&repo_root, PROMPT);
     let startup_worktree = startup_task_id
         .as_deref()
         .and_then(|id| create_worktree(id, &repo_root));
@@ -1543,9 +1662,9 @@ fn main() -> io::Result<()> {
         0, "claude-code", &claude_cmd, pane_rows, pane_cols,
         startup_worktree.as_deref(),
     ) {
-        // dispatch-bgz.9: beads task lifecycle on startup
+        // dispatch-1lc.3: task lifecycle via .dispatch/tasks.md
         if let Some(id) = &startup_task_id {
-            bd_assign_task(id, &slot.callsign);
+            update_task_in_file(&repo_root, id, '~', Some(&slot.callsign));
             let prefixed = format!("[Dispatch task {id}] {PROMPT}\r");
             let _ = slot.writer.write_all(prefixed.as_bytes());
             let _ = slot.writer.flush();
@@ -1564,10 +1683,11 @@ fn main() -> io::Result<()> {
         st.event_tx = Some(ws_event_tx);
     }
 
-    // Background thread: fetch queued tasks every TASK_POLL_SECS (dispatch-bgz.11).
+    // Background thread: poll .dispatch/tasks.md for ready tasks (dispatch-1lc.3).
     let (tasks_tx, tasks_rx) = mpsc::channel::<Vec<QueuedTask>>();
+    let poll_repo_root = repo_root.clone();
     thread::spawn(move || loop {
-        let _ = tasks_tx.send(bd_fetch_queued());
+        let _ = tasks_tx.send(fetch_ready_tasks(&poll_repo_root));
         thread::sleep(Duration::from_secs(TASK_POLL_SECS));
     });
 
@@ -1600,7 +1720,7 @@ fn main() -> io::Result<()> {
                         } else {
                             app.push_ticker(format!("TASK COMPLETE: {} closed {} — slot {} now standby", callsign, id, i + 1));
                         }
-                        bd_close_task(&id);
+                        update_task_in_file(&app.repo_root, &id, 'x', None);
                     } else {
                         app.push_ticker(format!("AGENT EXITED: {} (slot {}) — standby", callsign, i + 1));
                     }
@@ -1661,14 +1781,14 @@ fn main() -> io::Result<()> {
                 slot.task_id = None;
                 slot.idle_since = None;
             }
-            bd_close_task(&task_id);
+            update_task_in_file(&app.repo_root, &task_id, 'x', None);
 
             // Pick up next available queued task and assign it to the idle slot.
-            let next = bd_fetch_queued().into_iter().next();
+            let next = fetch_ready_tasks(&app.repo_root).into_iter().next();
             if let Some(qt) = next {
                 if let Some(slot) = app.slots[i].as_mut() {
                     let callsign = slot.callsign.clone();
-                    if bd_assign_task(&qt.id, &callsign) {
+                    if update_task_in_file(&app.repo_root, &qt.id, '~', Some(&callsign)) {
                         let prompt = format!("[Dispatch task {}] {}\r", qt.id, qt.title);
                         let _ = slot.writer.write_all(prompt.as_bytes());
                         let _ = slot.writer.flush();
@@ -1714,11 +1834,11 @@ fn main() -> io::Result<()> {
                                 app.push_ticker(format!("AUTO-DISPATCH: {} launched in slot {}", name, g + 1));
                             }
                         }
-                        let task_id = bd_create_task(&prompt);
+                        let task_id = create_task_in_file(&app.repo_root, &prompt);
                         let mut ticker_msg: Option<String> = None;
                         if let Some(slot_state) = app.slots[g].as_mut() {
                             if let Some(ref id) = task_id {
-                                bd_assign_task(id, &slot_state.callsign);
+                                update_task_in_file(&app.repo_root, id, '~', Some(&slot_state.callsign));
                                 let prefixed = format!("[Dispatch task {id}] {prompt}\r");
                                 let _ = slot_state.writer.write_all(prefixed.as_bytes());
                                 let _ = slot_state.writer.flush();
@@ -1736,9 +1856,9 @@ fn main() -> io::Result<()> {
                     }
                 }
                 ws_server::WsEvent::QueueTask { prompt } => {
-                    // Create an open beads task; it will surface in the next
-                    // queued-task poll and can be picked up when a slot frees.
-                    if let Some(id) = bd_create_task(&prompt) {
+                    // Create an open task in .dispatch/tasks.md; it will
+                    // surface in the next poll and be picked up when a slot frees.
+                    if let Some(id) = create_task_in_file(&app.repo_root, &prompt) {
                         app.push_ticker(format!("QUEUED: all agents busy — task {} waiting", id));
                     }
                 }
@@ -1843,7 +1963,7 @@ fn main() -> io::Result<()> {
                                         }
                                         for i in 0..MAX_SLOTS {
                                             if let Some(task_id) = terminate_slot(&mut app.slots[i]) {
-                                                bd_reopen_task(&task_id);
+                                                update_task_in_file(&app.repo_root, &task_id, ' ', None);
                                             }
                                         }
                                         quit_requested = true;
@@ -1857,7 +1977,7 @@ fn main() -> io::Result<()> {
                                         let target_g = app.target_global();
                                         let callsign = app.slots[target_g].as_ref().map(|s| s.display_name().to_string()).unwrap_or_default();
                                         if let Some(task_id) = terminate_slot(&mut app.slots[target_g]) {
-                                            bd_reopen_task(&task_id);
+                                            update_task_in_file(&app.repo_root, &task_id, ' ', None);
                                             app.push_ticker(format!("TERMINATED: {} (slot {}) — task {} reopened", callsign, target_g + 1, task_id));
                                         } else if !callsign.is_empty() {
                                             app.push_ticker(format!("TERMINATED: {} (slot {})", callsign, target_g + 1));
@@ -2035,7 +2155,7 @@ fn main() -> io::Result<()> {
                                 }
 
                                 KeyCode::Char('t') => {
-                                    app.task_list_data = bd_fetch_task_list(&app.slots);
+                                    app.task_list_data = fetch_task_list_from_file(&app.repo_root, &app.slots);
                                     app.overlay = Overlay::TaskList;
                                 }
                                 KeyCode::Char('p') => app.psk_expanded = !app.psk_expanded,
