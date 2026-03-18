@@ -103,11 +103,14 @@ The console displays four agent panes at a time in a 2x2 grid with a scrolling t
 | `1`-`4`           | Select target slot on current page                  |
 | `Tab`             | Cycle target forward across all agents              |
 | `]` / `[`         | Next / previous page                                |
-| `PgUp` / `PgDn`   | Scroll pane output up/down                          |
+| `k` / `Up` / `PgUp` | Scroll up half a page (scrollback history)         |
+| `j` / `Down` / `PgDn` | Scroll down half a page toward live output       |
+| `G`               | Snap to live output                                 |
 | `n`               | Dispatch new agent into first empty slot            |
 | `x`               | Terminate agent in targeted slot                    |
 | `R`               | Rename agent in targeted slot                       |
 | `t`               | Show task list overlay                              |
+| `P`               | Prune completed tasks from tasks.md                 |
 | `p`               | Show/hide full PSK                                  |
 | `Q`               | Show QR code for radio pairing                      |
 | `q`               | Quit                                                |

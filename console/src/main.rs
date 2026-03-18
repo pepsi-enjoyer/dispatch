@@ -23,7 +23,9 @@
 // dispatch-1lc.4: task list overlay — full-screen plan view with status groups and agent assignments
 // dispatch-1lc.3: task dependencies — -> arrow syntax in .dispatch/tasks.md, dependency-aware dispatch
 // dispatch-fnx: headless planner — spawns claude -p to decompose complex prompts into task plans
-// dispatch-ct2.4: terminal scrollback in panes — PgUp/PgDn in command mode, configurable buffer
+// dispatch-ct2.4: terminal scrollback in panes — PgUp/PgDn/k/j/G in command mode, configurable buffer
+// dispatch-ct2.5: idle detection refinement — patterns for copilot, shell, and generic tools
+// dispatch-ct2.9: TASKS.md pruning — P key removes completed [x] tasks from tasks.md
 //
 // Layout:
 //   Header bar  : DISPATCH title, radio state, PSK, agent count, PAGE X/Y, clock
@@ -861,7 +863,7 @@ fn dispatch_plan_tasks(app: &mut App) -> usize {
             let worktree = create_worktree(&task.id, &repo_root);
             if let Some(slot) = dispatch_slot(
                 slot_idx, "claude-code", &tool_cmd, pane_rows, pane_cols,
-                worktree.as_deref(),
+                worktree.as_deref(), app.scrollback_lines,
             ) {
                 app.slots[slot_idx] = Some(slot);
             } else {
@@ -891,6 +893,29 @@ fn dispatch_plan_tasks(app: &mut App) -> usize {
     dispatched
 }
 
+/// Remove completed [x] tasks from .dispatch/tasks.md (dispatch-ct2.9).
+/// Returns the number of tasks pruned.
+fn prune_completed_tasks(repo_root: &str) -> usize {
+    let (lines, tasks) = parse_tasks_md(repo_root);
+    let remove: std::collections::HashSet<usize> = tasks
+        .iter()
+        .filter(|t| t.status == 'x')
+        .map(|t| t.line_idx)
+        .collect();
+    if remove.is_empty() {
+        return 0;
+    }
+    let kept: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !remove.contains(i))
+        .map(|(_, l)| l.as_str())
+        .collect();
+    let path = tasks_md_path(repo_root);
+    let _ = std::fs::write(&path, kept.join("\n") + "\n");
+    remove.len()
+}
+
 // ── task completion detection (dispatch-1lc.2) ────────────────────────────────
 
 /// Extract the text content of a single screen row, trimming trailing spaces.
@@ -915,21 +940,25 @@ fn compute_screen_hash(screen: &vt100::Screen) -> u64 {
 }
 
 /// Return true if the last non-blank row of the screen matches the idle prompt
-/// pattern for the given tool.
+/// pattern for the given tool (dispatch-ct2.5).
 ///
-/// claude-code idle: last non-blank row is exactly ">" or "> "
+/// | Tool        | Idle pattern                                       |
+/// |-------------|----------------------------------------------------|
+/// | claude-code | `>` or `> ` on last active row                     |
+/// | copilot     | `?` or line containing "What would you like"       |
+/// | shell/*     | ends with `$ ` or `# ` (standard shell prompts)    |
 fn is_idle_prompt(screen: &vt100::Screen, tool: &str) -> bool {
-    if tool != "claude-code" {
-        return false;
-    }
     let (rows, _) = screen.size();
-    for r in (0..rows).rev() {
-        let text = screen_row_text(screen, r);
-        if !text.is_empty() {
-            return text == ">" || text == "> ";
-        }
+    let last_text = (0..rows).rev().map(|r| screen_row_text(screen, r)).find(|t| !t.is_empty());
+    let text = match last_text {
+        Some(t) => t,
+        None => return false,
+    };
+    match tool {
+        "claude-code" => text == ">" || text == "> ",
+        "copilot" => text == "?" || text.contains("What would you like"),
+        _ => text.ends_with("$ ") || text.ends_with("# "),
     }
-    false
 }
 
 // ── worktree helpers (dispatch-xje) ───────────────────────────────────────────
@@ -1398,7 +1427,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 ),
                 Span::styled(ws_target_str, Style::default().fg(Color::Cyan)),
                 Span::styled(
-                    "│ i/Enter input │ 1-4 slot │ Tab cycle │ ]/[ page │ PgUp/Dn scroll │ n/N dispatch │ x term │ R rename │ t tasks │ p psk │ q quit │ ? help",
+                    "│ i/Enter input │ 1-4 slot │ Tab cycle │ k/j scroll │ n/N dispatch │ x term │ t tasks │ P prune │ Q qr │ ? help",
                     Style::default().fg(Color::DarkGray),
                 ),
             ])
@@ -1432,7 +1461,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn render_help_overlay(f: &mut Frame, area: Rect) {
-    let r = centered_rect(52, 26, area);
+    let r = centered_rect(52, 28, area);
     f.render_widget(Clear, r);
     let lines = vec![
         Line::from(Span::styled(
@@ -1446,12 +1475,15 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::raw("  Shift+Tab    Prev slot (all pages)")),
         Line::from(Span::raw("  ] / Shift+→  Next page")),
         Line::from(Span::raw("  [ / Shift+←  Prev page")),
-        Line::from(Span::raw("  PgUp / PgDn  Scroll pane output")),
+        Line::from(Span::raw("  k / Up / PgUp  Scroll up (half page)")),
+        Line::from(Span::raw("  j / Dn / PgDn  Scroll down (half page)")),
+        Line::from(Span::raw("  G            Snap to live output")),
         Line::from(Span::raw("  n            Dispatch into first empty slot")),
         Line::from(Span::raw("  N            Dispatch into specific slot")),
         Line::from(Span::raw("  x            Terminate target agent")),
         Line::from(Span::raw("  R            Rename target agent")),
         Line::from(Span::raw("  t            Task list overlay")),
+        Line::from(Span::raw("  P            Prune completed tasks")),
         Line::from(Span::raw("  p            Toggle PSK visibility")),
         Line::from(Span::raw("  Q            Show QR code for radio pairing")),
         Line::from(Span::raw("  q            Quit (confirms if agents running)")),
@@ -2235,7 +2267,7 @@ fn main() -> io::Result<()> {
                             let worktree = create_worktree(&id, &app.repo_root);
                             if let Some(mut slot) = dispatch_slot(
                                 g, "claude-code", &cmd, app.pane_rows, app.pane_cols,
-                                worktree.as_deref(),
+                                worktree.as_deref(), app.scrollback_lines,
                             ) {
                                 update_task_in_file(&app.repo_root, &id, '~', Some(&slot.callsign));
                                 let prefixed = format!("[Dispatch task {id}] {prompt}\r");
@@ -2620,24 +2652,38 @@ fn main() -> io::Result<()> {
                                     app.task_list_data = fetch_task_list_from_file(&app.repo_root, &app.slots);
                                     app.overlay = Overlay::TaskList;
                                 }
+                                // Prune completed tasks (dispatch-ct2.9)
+                                KeyCode::Char('P') => {
+                                    let n = prune_completed_tasks(&app.repo_root);
+                                    if n > 0 {
+                                        app.push_ticker(format!("PRUNED: {} completed task{} removed from tasks.md", n, if n == 1 { "" } else { "s" }));
+                                    } else {
+                                        app.push_ticker("PRUNE: no completed tasks to remove".to_string());
+                                    }
+                                }
                                 KeyCode::Char('p') => app.psk_expanded = !app.psk_expanded,
                                 KeyCode::Char('Q') => app.overlay = Overlay::QrCode,
                                 KeyCode::Char('?') => app.overlay = Overlay::Help,
 
-                                // Scrollback (dispatch-ct2.4)
-                                KeyCode::PageUp => {
+                                // Scrollback (dispatch-ct2.4, dispatch-ct2.5)
+                                KeyCode::PageUp | KeyCode::Char('k') | KeyCode::Up => {
                                     let target_g = app.target_global();
                                     if let Some(Some(slot)) = app.slots.get_mut(target_g) {
-                                        let half = (app.pane_rows as usize) / 2;
+                                        let half = (app.pane_rows as usize / 2).max(1);
                                         slot.scroll_offset = slot.scroll_offset.saturating_add(half);
-                                        // Clamp will happen in vt100's set_scrollback
                                     }
                                 }
-                                KeyCode::PageDown => {
+                                KeyCode::PageDown | KeyCode::Char('j') | KeyCode::Down => {
                                     let target_g = app.target_global();
                                     if let Some(Some(slot)) = app.slots.get_mut(target_g) {
-                                        let half = (app.pane_rows as usize) / 2;
+                                        let half = (app.pane_rows as usize / 2).max(1);
                                         slot.scroll_offset = slot.scroll_offset.saturating_sub(half);
+                                    }
+                                }
+                                KeyCode::Char('G') => {
+                                    let target_g = app.target_global();
+                                    if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                        slot.scroll_offset = 0;
                                     }
                                 }
 

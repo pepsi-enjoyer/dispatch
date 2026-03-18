@@ -643,11 +643,14 @@ While in input mode, `Escape` is the only key intercepted by the console. Everyt
 | `N`               | Dispatch new agent into a specific slot (prompts for slot number) |
 | `x`               | Terminate agent in currently targeted slot (confirms first)  |
 | `R`               | Rename agent in currently targeted slot                      |
+| `k` / `Up` / `PgUp` | Scroll up half a page in targeted pane's scrollback       |
+| `j` / `Down` / `PgDn` | Scroll down half a page toward live output              |
+| `G`               | Snap to live output (exit scrollback)                        |
 | `t`               | Show task list overlay (plan, active, queued, completed)             |
+| `P`               | Prune completed tasks from `.dispatch/tasks.md`              |
 | `p`               | Show/hide full PSK                                           |
 | `Q`               | Show QR code overlay for radio pairing                       |
 | `q`               | Quit (confirms if agents are running)                        |
-| `PgUp` / `PgDn`   | Scroll pane output up/down (half-page increments)            |
 | `?`               | Toggle help overlay                                          |
 
 `Tab` / `Shift+Tab` cycle through all active agents across all pages, not just the current page. The view auto-navigates to the page containing the newly targeted agent. `1-4` always refer to the four slots on the current page -- so pressing `2` on page 2 selects slot 6 (Foxtrot).
@@ -671,7 +674,7 @@ let vte = vt100::Parser::new(24, 80, 1000); // rows, cols, scrollback
 
 A tokio task per slot reads from the PTY reader and feeds bytes into the `vt100::Parser`. The parser maintains a `Screen` object representing the current terminal state. The ratatui render loop reads from this screen on each frame.
 
-**Scrollback:** the `vt100::Parser` is initialized with a scrollback buffer (default 1000 lines, configurable via `terminal.scrollback_lines`). In command mode, `PgUp`/`PgDn` scroll the targeted pane by half-page increments. A `SCROLL` indicator appears when not at the bottom. Scrollback resets to the bottom on new output or when entering input mode.
+**Scrollback:** the `vt100::Parser` is initialized with a scrollback buffer (default 1000 lines, configurable via `terminal.scrollback_lines`). In command mode, `k`/`Up`/`PgUp` and `j`/`Down`/`PgDn` scroll the targeted pane by half-page increments; `G` snaps to live output. A `SCROLL` indicator appears when not at the bottom. Scrollback resets to the bottom on new output or when entering input mode.
 
 **Input forwarding (input mode):**
 
@@ -1007,11 +1010,11 @@ Radio:
 - QR code pairing in console TUI.
 - ~~Continuous listening mode with voice-activity detection.~~ (done)
 - ~~Terminal scrollback in panes.~~ (done)
-- Agent busy/idle detection: refine idle prompt patterns and completion timeout per tool as edge cases surface in testing.
+- ~~Agent busy/idle detection: refine idle prompt patterns and completion timeout per tool as edge cases surface in testing.~~ (done)
 - TLS on the WebSocket.
 - ~~AccessibilityService for screen-off volume button capture.~~ (done)
 - Console prompt history and logging.
-- `.dispatch/tasks.md` pruning for long-running projects (archive completed tasks).
+- ~~`.dispatch/tasks.md` pruning for long-running projects (archive completed tasks).~~ (done)
 - Wear OS companion: minimal wrist app (`radio/wear/` module) with status glance (connection state, current target, active agents), crown rotation for target cycling, and tap-to-dispatch trigger. Standalone APK, same WebSocket protocol as the phone radio. Settings (host, port, PSK) via long-press.
 
 ---
