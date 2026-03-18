@@ -1,22 +1,28 @@
 // dispatch: Console TUI for Dispatch
 //
-// dispatch-bgz.2: embedded terminal per slot (portable-pty + vt100)
 // dispatch-e0k.1: PTY with claude via portable-pty + vt100 + ratatui
 // dispatch-e0k.2: keyboard input forwarding to PTY
 // dispatch-e0k.3: bd create integration from Rust
+// dispatch-bgz.1: quad-pane TUI layout with multi-page support
+// dispatch-bgz.2: embedded terminal per slot (portable-pty + vt100)
+// dispatch-bgz.3: agent naming (NATO phonetic alphabet, slot-bound, custom rename)
 // dispatch-bgz.4: modal input model (command mode / input mode)
 // dispatch-bgz.5: full command mode keybindings
+// dispatch-bgz.6: PTY management (dispatch, terminate, resize, prompt injection)
+// dispatch-bgz.7: WebSocket server with PSK authentication
 // dispatch-bgz.8: WebSocket protocol (ws_server + protocol modules)
 // dispatch-bgz.9: beads task lifecycle (create, assign, close, reopen)
 // dispatch-bgz.10: pane info strip and header bar
 // dispatch-bgz.11: standby pane (empty slot display + queued task list)
 // dispatch-bgz.12: config file and CLI subcommands
-// dispatch-bgz.1: quad-pane TUI layout with multi-page support
 //
 // Layout:
 //   Header bar  : DISPATCH title, radio state, PSK, agent count, PAGE X/Y, clock
 //   Quad pane   : 2x2 grid; each pane has info strip + terminal area
 //   Footer bar  : mode indicator, target, navigation hints
+//
+// Pages: slots 1-4 on page 1, 5-8 on page 2, etc. (max 26 slots / 7 pages).
+// All PTYs run regardless of visible page. Each slot owns its own PTY.
 
 mod config;
 mod protocol;
@@ -40,7 +46,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -71,8 +77,10 @@ enum Commands {
 
 // ── constants ────────────────────────────────────────────────────────────────
 
-const PTY_ROWS: u16 = 20;
-const PTY_COLS: u16 = 80;
+/// Total number of agent slots (maps to NATO alphabet A-Z).
+const MAX_SLOTS: usize = 26;
+/// Slots per page (2×2 grid).
+const SLOTS_PER_PAGE: usize = 4;
 const TASK_POLL_SECS: u64 = 5;
 
 const NATO: &[&str] = &[
@@ -81,21 +89,24 @@ const NATO: &[&str] = &[
     "UNIFORM", "VICTOR", "WHISKEY", "X-RAY", "YANKEE", "ZULU",
 ];
 
+// Reserved words that cannot be used as custom callsigns (dispatch-bgz.3).
+const RESERVED_CALLSIGNS: &[&str] = &[
+    "ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOXTROT", "GOLF", "HOTEL", "INDIA", "JULIET",
+    "KILO", "LIMA", "MIKE", "NOVEMBER", "OSCAR", "PAPA", "QUEBEC", "ROMEO", "SIERRA", "TANGO",
+    "UNIFORM", "VICTOR", "WHISKEY", "X-RAY", "YANKEE", "ZULU",
+    "STANDBY", "DISPATCH", "IDLE",
+];
+
 // ── types ─────────────────────────────────────────────────────────────────────
 
 /// Input mode for the console (dispatch-bgz.4).
-///
-/// - `Command`: default mode; keystrokes control the console (navigation, quit, etc.).
-/// - `Input`: keystrokes are forwarded directly to the active PTY.
-///   The only key the console intercepts in this mode is Escape.
-///   A double-Escape sends one literal Escape byte to the PTY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Command,
     Input,
 }
 
-/// Active overlay shown on top of the quad pane (dispatch-bgz.5).
+/// Active overlay (dispatch-bgz.5).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Overlay {
     None,
@@ -103,25 +114,41 @@ enum Overlay {
     TaskList,
     ConfirmQuit,
     ConfirmTerminate,
-    DispatchSlot, // for 'N' -- dispatch into specific slot
+    DispatchSlot,
+    Rename,
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // Connected variant used when WebSocket is wired up (dispatch-bgz.7)
 enum RadioState {
     Connected,
     Disconnected,
 }
 
-struct AgentSlot {
-    callsign: String,
+/// Per-slot PTY and display state (dispatch-bgz.2).
+/// Not Send — only used on the main thread.
+struct SlotState {
+    callsign: String,            // NATO default (slot-bound)
+    custom_name: Option<String>, // user rename (dispatch-bgz.3)
     tool: String,
     task_id: Option<String>,
     dispatch_time: Instant,
-    dispatch_wall_str: String, // "14:20"
+    dispatch_wall_str: String,
+    // PTY
+    screen: Arc<Mutex<vt100::Parser>>,
+    writer: Box<dyn Write + Send>,
+    child_exited: Arc<AtomicBool>,
+    child_pid: Option<u32>,
+    // Keep master alive for resize (dispatch-bgz.6)
+    master: Box<dyn portable_pty::MasterPty>,
 }
 
-/// A task ready to be dispatched, fetched from `bd ready --json` (dispatch-bgz.11).
+impl SlotState {
+    fn display_name(&self) -> &str {
+        self.custom_name.as_deref().unwrap_or(&self.callsign)
+    }
+}
+
+/// A task ready to be dispatched (dispatch-bgz.11).
 #[derive(Clone)]
 struct QueuedTask {
     id: String,
@@ -129,73 +156,74 @@ struct QueuedTask {
 }
 
 struct App {
-    /// All agent slots (length = max_agents). Index = global slot number - 1.
-    slots: Vec<Option<AgentSlot>>,
+    slots: [Option<SlotState>; MAX_SLOTS],
     current_page: usize,
-    total_pages: usize,
-    /// 0-indexed into the current page's 4 slots (0-3) for the targeted pane.
+    /// 0-indexed into the current page's 4 visible slots.
     target: usize,
     mode: Mode,
-    /// Whether the previous key in Input mode was Escape (for double-Escape passthrough).
     last_was_escape: bool,
     radio_state: RadioState,
     psk: String,
     psk_expanded: bool,
-    active_count: usize,
-    max_agents: usize,
-    /// Active overlay (dispatch-bgz.5).
     overlay: Overlay,
-    /// Input buffer for the 'N' dispatch-into-slot prompt (dispatch-bgz.5).
+    /// Shared input buffer for DispatchSlot and Rename overlays.
     input_buf: String,
-    /// Open/unblocked tasks from beads, displayed in the last standby pane (dispatch-bgz.11).
     queued_tasks: Vec<QueuedTask>,
-    /// WebSocket protocol state shared with the WS server thread (dispatch-bgz.8).
     ws_state: ws_server::SharedState,
+    pane_rows: u16,
+    pane_cols: u16,
+    tools: std::collections::HashMap<String, String>,
 }
 
 impl App {
-    fn new(psk: String, max_agents: usize, task_id: Option<String>, ws_state: ws_server::SharedState) -> Self {
-        let wall = Local::now().format("%H:%M").to_string();
-        let alpha = AgentSlot {
-            callsign: NATO[0].to_string(),
-            tool: "claude-code".to_string(),
-            task_id,
-            dispatch_time: Instant::now(),
-            dispatch_wall_str: wall,
-        };
-        let mut slots: Vec<Option<AgentSlot>> = (0..max_agents).map(|_| None).collect();
-        slots[0] = Some(alpha);
-        let total_pages = (max_agents + 3) / 4;
+    fn new(
+        psk: String,
+        ws_state: ws_server::SharedState,
+        pane_rows: u16,
+        pane_cols: u16,
+        tools: std::collections::HashMap<String, String>,
+    ) -> Self {
         App {
-            slots,
+            slots: std::array::from_fn(|_| None),
             current_page: 0,
-            total_pages,
             target: 0,
             mode: Mode::Command,
             last_was_escape: false,
             radio_state: RadioState::Disconnected,
             psk,
             psk_expanded: false,
-            active_count: 1,
-            max_agents,
             overlay: Overlay::None,
             input_buf: String::new(),
             queued_tasks: Vec::new(),
             ws_state,
+            pane_rows,
+            pane_cols,
+            tools,
         }
     }
 
-    /// Returns the callsign of the WS-protocol-targeted agent (slot from last set_target message).
-    fn ws_target_callsign(&self) -> Option<String> {
-        let st = self.ws_state.lock().ok()?;
-        let slot = st.target?;
-        let idx = (slot as usize).saturating_sub(1);
-        st.slots.get(idx)?.as_ref().map(|a| a.callsign.clone())
+    fn global_idx(&self, local_idx: usize) -> usize {
+        self.current_page * SLOTS_PER_PAGE + local_idx
     }
 
-    /// Global slot index for the currently targeted pane.
-    fn global_target(&self) -> usize {
-        self.current_page * 4 + self.target
+    fn target_global(&self) -> usize {
+        self.global_idx(self.target)
+    }
+
+    fn active_count(&self) -> usize {
+        self.slots.iter().filter(|s| s.is_some()).count()
+    }
+
+    /// Total pages needed: enough to show all active slots plus at least one standby.
+    fn total_pages(&self) -> usize {
+        let last_active = self
+            .slots
+            .iter()
+            .rposition(|s| s.is_some())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let needed = (last_active + SLOTS_PER_PAGE).max(SLOTS_PER_PAGE);
+        ((needed + SLOTS_PER_PAGE - 1) / SLOTS_PER_PAGE).min(MAX_SLOTS / SLOTS_PER_PAGE + 1)
     }
 
     fn psk_display(&self) -> String {
@@ -211,94 +239,152 @@ impl App {
         if self.slots[global_idx].is_some() {
             return false;
         }
-        // Only applies to the last page
-        if global_idx / 4 != self.total_pages - 1 {
+        let total = self.total_pages();
+        let page = global_idx / SLOTS_PER_PAGE;
+        if page != total - 1 {
             return false;
         }
-        // No later slot on the last page is also empty
-        for i in (global_idx + 1)..self.slots.len() {
-            if self.slots[i].is_none() {
+        let local = global_idx % SLOTS_PER_PAGE;
+        for i in (local + 1)..SLOTS_PER_PAGE {
+            let g = page * SLOTS_PER_PAGE + i;
+            if g < MAX_SLOTS && self.slots[g].is_none() {
                 return false;
             }
         }
         true
     }
+
+    fn ws_target_callsign(&self) -> Option<String> {
+        let st = self.ws_state.lock().ok()?;
+        let slot = st.target?;
+        let idx = (slot as usize).saturating_sub(1);
+        st.slots.get(idx)?.as_ref().map(|a| a.callsign.clone())
+    }
+
+    fn tool_cmd(&self, tool_key: &str) -> &str {
+        self.tools
+            .get(tool_key)
+            .map(|s| s.as_str())
+            .unwrap_or("claude")
+    }
 }
 
-// ── per-slot PTY (dispatch-bgz.2) ─────────────────────────────────────────────
+// ── PTY helpers (dispatch-bgz.2, dispatch-bgz.6) ──────────────────────────────
 
-/// One PTY per dispatched agent: master handle for resize, writer for input,
-/// shared screen for render, and an exit flag set by the reader thread.
-struct SlotPty {
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    screen: Arc<Mutex<vt100::Parser>>,
-    child_exited: Arc<AtomicBool>,
-    rows: u16,
-    cols: u16,
-}
+/// Open a PTY and spawn a process. Returns a SlotState on success.
+fn dispatch_slot(
+    global_idx: usize,
+    tool_key: &str,
+    tool_cmd: &str,
+    pane_rows: u16,
+    pane_cols: u16,
+) -> Option<SlotState> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: pane_rows,
+            cols: pane_cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .ok()?;
 
-impl SlotPty {
-    /// Open a PTY and spawn `cmd`; falls back to shell if `cmd` is not found.
-    fn spawn(rows: u16, cols: u16, cmd: &str) -> Option<Self> {
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .ok()?;
+    let parts: Vec<&str> = tool_cmd.split_whitespace().collect();
+    let cmd = if parts.is_empty() {
+        CommandBuilder::new("claude")
+    } else {
+        let mut c = CommandBuilder::new(parts[0]);
+        for arg in &parts[1..] {
+            c.arg(arg);
+        }
+        c
+    };
 
-        let _ = pair
-            .slave
-            .spawn_command(CommandBuilder::new(cmd))
-            .or_else(|_| {
-                let shell = if cfg!(windows) { "cmd" } else { "bash" };
-                pair.slave.spawn_command(CommandBuilder::new(shell))
-            })
-            .ok()?;
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .or_else(|_| {
+            let shell = if cfg!(windows) { "cmd" } else { "bash" };
+            pair.slave.spawn_command(CommandBuilder::new(shell))
+        })
+        .ok()?;
 
-        let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
-        let screen_w = Arc::clone(&screen);
-        let mut reader = pair.master.try_clone_reader().ok()?;
-        let exited = Arc::new(AtomicBool::new(false));
-        let exited_w = Arc::clone(&exited);
+    let child_pid = child.process_id();
 
-        thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        screen_w.lock().unwrap().process(&buf[..n]);
-                    }
+    let screen = Arc::new(Mutex::new(vt100::Parser::new(pane_rows, pane_cols, 0)));
+    let screen_w = Arc::clone(&screen);
+    let child_exited = Arc::new(AtomicBool::new(false));
+    let child_exited_w = Arc::clone(&child_exited);
+    let mut pty_reader = pair.master.try_clone_reader().ok()?;
+
+    thread::spawn(move || {
+        let mut child = child;
+        let mut buf = [0u8; 4096];
+        loop {
+            match pty_reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    screen_w.lock().unwrap().process(&buf[..n]);
                 }
             }
-            exited_w.store(true, Ordering::Relaxed);
-        });
+        }
+        let _ = child.wait();
+        child_exited_w.store(true, Ordering::Relaxed);
+    });
 
-        let writer = pair.master.take_writer().ok()?;
-        let master = pair.master;
-        Some(SlotPty { master, writer, screen, child_exited: exited, rows, cols })
+    let writer = pair.master.take_writer().ok()?;
+    let callsign = NATO[global_idx % NATO.len()].to_string();
+    let wall = Local::now().format("%H:%M").to_string();
+
+    Some(SlotState {
+        callsign,
+        custom_name: None,
+        tool: tool_key.to_string(),
+        task_id: None,
+        dispatch_time: Instant::now(),
+        dispatch_wall_str: wall,
+        screen,
+        writer,
+        child_exited,
+        child_pid,
+        master: pair.master,
+    })
+}
+
+/// Kill a child process by PID (dispatch-bgz.6).
+fn kill_child_pid(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .output();
     }
-
-    fn screen_lines(&self) -> Vec<Line<'static>> {
-        let parser = self.screen.lock().unwrap();
-        screen_to_lines(parser.screen())
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
     }
+}
 
-    fn is_exited(&self) -> bool {
-        self.child_exited.load(Ordering::Relaxed)
+/// Terminate a slot: kill child, clear slot, return task_id for beads reopen.
+fn terminate_slot(slot: &mut Option<SlotState>) -> Option<String> {
+    if let Some(s) = slot.as_ref() {
+        if let Some(pid) = s.child_pid {
+            kill_child_pid(pid);
+        }
     }
+    let task_id = slot.as_ref().and_then(|s| s.task_id.clone());
+    *slot = None;
+    task_id
+}
 
-    /// Resize the PTY and update the vt100 parser dimensions.
-    fn resize(&mut self, rows: u16, cols: u16) {
-        let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-        self.screen.lock().unwrap().set_size(rows, cols);
-        self.rows = rows;
-        self.cols = cols;
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+/// Resize all active PTYs to the new pane size (dispatch-bgz.6).
+fn resize_all_slots(slots: &mut [Option<SlotState>; MAX_SLOTS], new_size: PtySize) {
+    for slot in slots.iter_mut().flatten() {
+        let _ = slot.master.resize(new_size);
+        let mut parser = slot.screen.lock().unwrap();
+        *parser = vt100::Parser::new(new_size.rows, new_size.cols, 0);
     }
 }
 
@@ -309,42 +395,42 @@ fn format_runtime(elapsed: Duration) -> String {
     format!("{}m{:02}s", s / 60, s % 60)
 }
 
-/// Run `bd create "{prompt}" -t task --json` and return the task ID.
+/// Validate a custom callsign (dispatch-bgz.3).
+fn is_valid_callsign(name: &str) -> bool {
+    if name.is_empty() || name.len() > 20 {
+        return false;
+    }
+    if name.chars().any(|c| c.is_whitespace()) {
+        return false;
+    }
+    let upper = name.to_uppercase();
+    !RESERVED_CALLSIGNS.contains(&upper.as_str())
+}
+
 fn bd_create_task(prompt: &str) -> Option<String> {
     let output = Command::new("bd")
         .args(["create", prompt, "-t", "task", "--json"])
         .output()
         .ok()?;
-
     if !output.status.success() {
         return None;
     }
-
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // bd returns a JSON array; extract the first id field
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
     v.get(0)?.get("id")?.as_str().map(|s| s.to_owned())
 }
 
-/// Run `bd update {id} --claim --assignee {callsign} --status in_progress --json`.
 fn bd_assign_task(id: &str, callsign: &str) -> bool {
     Command::new("bd")
         .args([
-            "update",
-            id,
-            "--claim",
-            "--assignee",
-            callsign,
-            "--status",
-            "in_progress",
-            "--json",
+            "update", id, "--claim", "--assignee", callsign,
+            "--status", "in_progress", "--json",
         ])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-/// Run `bd close {id} --reason "Completed" --json`.
 fn bd_close_task(id: &str) -> bool {
     Command::new("bd")
         .args(["close", id, "--reason", "Completed", "--json"])
@@ -353,7 +439,6 @@ fn bd_close_task(id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Run `bd update {id} --status open --json` to reopen an abandoned task.
 fn bd_reopen_task(id: &str) -> bool {
     Command::new("bd")
         .args(["update", id, "--status", "open", "--json"])
@@ -362,29 +447,22 @@ fn bd_reopen_task(id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Run `bd ready --json` and return open/unblocked tasks for the queue display (dispatch-bgz.11).
 fn bd_fetch_queued() -> Vec<QueuedTask> {
     let output = match Command::new("bd").args(["ready", "--json"]).output() {
         Ok(o) => o,
         Err(_) => return vec![],
     };
-
     if !output.status.success() {
         return vec![];
     }
-
     let stdout = String::from_utf8_lossy(&output.stdout);
     let v: serde_json::Value = match serde_json::from_str(stdout.trim()) {
         Ok(v) => v,
         Err(_) => return vec![],
     };
-
-    let arr = match v.as_array() {
-        Some(a) => a,
-        None => return vec![],
-    };
-
-    arr.iter()
+    v.as_array()
+        .unwrap_or(&vec![])
+        .iter()
         .filter_map(|item| {
             let id = item.get("id")?.as_str()?.to_owned();
             let title = item.get("title")?.as_str()?.to_owned();
@@ -393,7 +471,6 @@ fn bd_fetch_queued() -> Vec<QueuedTask> {
         .collect()
 }
 
-/// Map a crossterm KeyEvent to the bytes that should be sent to the PTY.
 fn key_to_pty_bytes(key: &KeyEvent) -> Vec<u8> {
     match key.code {
         KeyCode::Enter => b"\r".to_vec(),
@@ -412,10 +489,8 @@ fn key_to_pty_bytes(key: &KeyEvent) -> Vec<u8> {
         KeyCode::Esc => b"\x1b".to_vec(),
         KeyCode::Char(c) => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                // Ctrl+A..Z -> 0x01..0x1a
                 if c.is_ascii_alphabetic() {
-                    let b = (c.to_ascii_lowercase() as u8) - b'a' + 1;
-                    vec![b]
+                    vec![(c.to_ascii_lowercase() as u8) - b'a' + 1]
                 } else {
                     let mut buf = [0u8; 4];
                     c.encode_utf8(&mut buf).as_bytes().to_vec()
@@ -444,7 +519,6 @@ fn key_to_pty_bytes(key: &KeyEvent) -> Vec<u8> {
     }
 }
 
-/// Convert a vt100 Cell color to ratatui Color.
 fn vt100_color_to_ratatui(color: vt100::Color) -> Option<Color> {
     match color {
         vt100::Color::Default => None,
@@ -453,7 +527,6 @@ fn vt100_color_to_ratatui(color: vt100::Color) -> Option<Color> {
     }
 }
 
-/// Render the vt100 screen into ratatui Lines.
 fn screen_to_lines(screen: &vt100::Screen) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for row in 0..screen.size().0 {
@@ -464,7 +537,6 @@ fn screen_to_lines(screen: &vt100::Screen) -> Vec<Line<'static>> {
         for col in 0..screen.size().1 {
             let cell = screen.cell(row, col).unwrap();
             let mut style = Style::default();
-
             if let Some(fg) = vt100_color_to_ratatui(cell.fgcolor()) {
                 style = style.fg(fg);
             }
@@ -521,10 +593,10 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let right = format!(
         "   PSK: {}   AGENTS: {}/{}  PAGE {}/{}  {}",
         app.psk_display(),
-        app.active_count,
-        app.max_agents,
+        app.active_count(),
+        app.slots.len(),
         app.current_page + 1,
-        app.total_pages,
+        app.total_pages(),
         clock,
     );
 
@@ -537,9 +609,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .title(Span::styled(
             " DISPATCH ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
@@ -549,9 +619,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(status_line), inner);
 }
 
-/// Build the 4-line info strip for one pane.
-/// `local_idx`: 0-3 position on current page; `global_idx`: index into app.slots.
-fn pane_info_strip(local_idx: usize, global_idx: usize, app: &App) -> Text<'static> {
+fn pane_info_strip(global_idx: usize, local_idx: usize, app: &App) -> Text<'static> {
     let slot_num = global_idx + 1;
     let is_target = app.target == local_idx;
 
@@ -584,11 +652,10 @@ fn pane_info_strip(local_idx: usize, global_idx: usize, app: &App) -> Text<'stat
             let line1 = Line::from(vec![
                 Span::styled(marker_str.to_string(), marker_style),
                 Span::styled(
-                    format!("[{}] {}", slot_num, agent.callsign),
+                    format!("[{}] {}", slot_num, agent.display_name()),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
             ]);
-
             let task_span = match &agent.task_id {
                 Some(id) => Span::styled(id.clone(), Style::default().fg(Color::Yellow)),
                 None => Span::styled("idle", Style::default().fg(Color::DarkGray)),
@@ -600,32 +667,25 @@ fn pane_info_strip(local_idx: usize, global_idx: usize, app: &App) -> Text<'stat
                 ),
                 task_span,
             ]);
-
             let runtime = format_runtime(agent.dispatch_time.elapsed());
             let line3 = Line::from(Span::styled(
                 format!("  dispatched {} | {}", agent.dispatch_wall_str, runtime),
                 Style::default().fg(Color::DarkGray),
             ));
-
             let sep = Line::from(Span::styled(
                 "┄".repeat(40),
                 Style::default().fg(Color::DarkGray),
             ));
-
             Text::from(vec![line1, line2, line3, sep])
         }
     }
 }
 
-/// Build the standby body lines for an empty pane (dispatch-bgz.11).
-///
-/// The last standby slot on the last page shows queued tasks; all others show dispatch shortcuts.
 fn standby_body(global_idx: usize, app: &App) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(""));
 
     if app.is_last_standby(global_idx) {
-        // Last standby on the last page: show queued task count and truncated titles
         lines.push(Line::from(Span::styled(
             format!(" Queued tasks: {}", app.queued_tasks.len()),
             Style::default().fg(Color::Yellow),
@@ -649,7 +709,6 @@ fn standby_body(global_idx: usize, app: &App) -> Vec<Line<'static>> {
             )));
         }
     } else {
-        // Regular standby slot: show dispatch shortcuts
         lines.push(Line::from(Span::styled(
             " Dispatch new agent:",
             Style::default().fg(Color::DarkGray),
@@ -657,15 +716,11 @@ fn standby_body(global_idx: usize, app: &App) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  [c] claude-code",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(Span::styled(
             "  [g] gh copilot",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         )));
     }
 
@@ -697,31 +752,37 @@ fn render_pane(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Split inner: 4 lines for info strip, rest for terminal / standby content
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(0)])
         .split(inner);
 
-    let info = pane_info_strip(local_idx, global_idx, app);
-    f.render_widget(Paragraph::new(info), chunks[0]);
+    f.render_widget(Paragraph::new(pane_info_strip(global_idx, local_idx, app)), chunks[0]);
 
     if let Some(lines) = vt_lines {
-        // Active pane: show PTY content
         f.render_widget(Paragraph::new(Text::from(lines)), chunks[1]);
     } else {
-        // Standby pane: show dispatch shortcuts or queued task list (dispatch-bgz.11)
-        let body = standby_body(global_idx, app);
-        f.render_widget(Paragraph::new(body), chunks[1]);
+        f.render_widget(Paragraph::new(standby_body(global_idx, app)), chunks[1]);
     }
 }
 
-fn render_panes(
-    f: &mut Frame,
-    area: Rect,
-    app: &App,
-    vt_lines: Vec<Option<Vec<Line<'static>>>>,
-) {
+/// Render the 2×2 quad pane for the current page (dispatch-bgz.1).
+fn render_panes(f: &mut Frame, area: Rect, app: &App) {
+    let page_start = app.current_page * SLOTS_PER_PAGE;
+
+    // Pre-compute vt lines for each visible slot (hold locks briefly, then release).
+    let mut page_lines: [Option<Vec<Line<'static>>>; SLOTS_PER_PAGE] =
+        [None, None, None, None];
+    for local in 0..SLOTS_PER_PAGE {
+        let g = page_start + local;
+        if g < MAX_SLOTS {
+            if let Some(slot) = &app.slots[g] {
+                let parser = slot.screen.lock().unwrap();
+                page_lines[local] = Some(screen_to_lines(parser.screen()));
+            }
+        }
+    }
+
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -736,22 +797,24 @@ fn render_panes(
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(cols[1]);
 
-    // top-left=local0, top-right=local1, bottom-left=local2, bottom-right=local3
-    // global_idx = current_page * 4 + local_idx (dispatch-bgz.2)
-    let page_start = app.current_page * 4;
-    let vl = |g: usize| vt_lines.get(g).and_then(|v| v.clone());
-    render_pane(f, left_rows[0],  0, page_start,     app, vl(page_start));
-    render_pane(f, right_rows[0], 1, page_start + 1, app, vl(page_start + 1));
-    render_pane(f, left_rows[1],  2, page_start + 2, app, vl(page_start + 2));
-    render_pane(f, right_rows[1], 3, page_start + 3, app, vl(page_start + 3));
+    // top-left=0, top-right=1, bottom-left=2, bottom-right=3
+    let areas = [left_rows[0], right_rows[0], left_rows[1], right_rows[1]];
+    for local in 0..SLOTS_PER_PAGE {
+        let g = page_start + local;
+        if g < MAX_SLOTS {
+            render_pane(f, areas[local], local, g, app, page_lines[local].take());
+        }
+    }
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let global = app.global_target();
-    let target_callsign = match &app.slots[global] {
-        Some(a) => a.callsign.clone(),
-        None => format!("[{}]", global + 1),
-    };
+    let target_g = app.target_global();
+    let target_name = app
+        .slots
+        .get(target_g)
+        .and_then(|s| s.as_ref())
+        .map(|a| a.display_name().to_string())
+        .unwrap_or_else(|| format!("[{}]", target_g + 1));
 
     let content = match app.mode {
         Mode::Command => {
@@ -759,7 +822,6 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 RadioState::Connected => "RADIO CONNECTED",
                 RadioState::Disconnected => "RADIO IDLE",
             };
-            // Show WS radio target if set (dispatch-bgz.8)
             let ws_target_str = match app.ws_target_callsign() {
                 Some(cs) => format!(" │ WS→{} ", cs),
                 None => String::new(),
@@ -768,22 +830,20 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled(" ▸ ", Style::default().fg(Color::Cyan)),
                 Span::styled(radio_label, Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!(" │ TARGET: {} ", target_callsign),
+                    format!(" │ TARGET: {} ", target_name),
                     Style::default().fg(Color::White),
                 ),
                 Span::styled(ws_target_str, Style::default().fg(Color::Cyan)),
                 Span::styled(
-                    "│ i/Enter input │ 1-4 slot │ Tab cycle │ ]/[ page │ n/N dispatch │ x term │ t tasks │ p psk │ q quit │ ? help",
+                    "│ i/Enter input │ 1-4 slot │ Tab cycle │ ]/[ page │ n/N dispatch │ x term │ R rename │ t tasks │ p psk │ q quit │ ? help",
                     Style::default().fg(Color::DarkGray),
                 ),
             ])
         }
         Mode::Input => Line::from(vec![
             Span::styled(
-                format!(" -- INPUT ({}) --", target_callsign),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
+                format!(" -- INPUT ({}) --", target_name),
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "                              ESC exit │ ESC ESC send Esc to PTY",
@@ -795,9 +855,8 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(content), area);
 }
 
-// ── overlay rendering (dispatch-bgz.5) ───────────────────────────────────────
+// ── overlays ──────────────────────────────────────────────────────────────────
 
-/// Return a centered rect with the given absolute width and height.
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
@@ -845,56 +904,56 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
             Style::default().fg(Color::DarkGray),
         )),
     ];
-    let block = Block::default()
-        .title(" HELP ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green));
     f.render_widget(
-        Paragraph::new(Text::from(lines)).block(block),
+        Paragraph::new(Text::from(lines)).block(
+            Block::default()
+                .title(" HELP ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        ),
         r,
     );
 }
 
 fn render_task_list_overlay(f: &mut Frame, area: Rect, app: &App) {
-    // Show only active (non-empty) slots across all pages
-    let active: Vec<(usize, &AgentSlot)> = app.slots.iter().enumerate()
-        .filter_map(|(i, s)| s.as_ref().map(|a| (i, a)))
-        .collect();
-    let height = (active.len() + 4).max(6) as u16;
-    let r = centered_rect(54, height, area);
+    let r = centered_rect(54, 14, area);
     f.render_widget(Clear, r);
     let mut lines = vec![Line::default()];
-    if active.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  (no active agents)",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    for (global_idx, a) in &active {
-        let slot_num = global_idx + 1;
-        let task = a.task_id.as_deref().unwrap_or("no task");
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("  [{}]  {}", slot_num, a.callsign),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {}", task),
-                Style::default().fg(Color::Yellow),
-            ),
-        ]));
+    let page_start = app.current_page * SLOTS_PER_PAGE;
+    for local in 0..SLOTS_PER_PAGE {
+        let g = page_start + local;
+        if g >= MAX_SLOTS {
+            break;
+        }
+        match &app.slots[g] {
+            None => lines.push(Line::from(Span::styled(
+                format!("  [{}]  -- empty --", g + 1),
+                Style::default().fg(Color::DarkGray),
+            ))),
+            Some(a) => {
+                let task = a.task_id.as_deref().unwrap_or("no task");
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  [{}]  {}", g + 1, a.display_name()),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("  {}", task), Style::default().fg(Color::Yellow)),
+                ]));
+            }
+        }
     }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
         "  Press any key to close",
         Style::default().fg(Color::DarkGray),
     )));
-    let block = Block::default()
-        .title(" TASK LIST ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
     f.render_widget(
-        Paragraph::new(Text::from(lines)).block(block),
+        Paragraph::new(Text::from(lines)).block(
+            Block::default()
+                .title(" TASK LIST ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        ),
         r,
     );
 }
@@ -904,10 +963,7 @@ fn render_confirm_overlay(f: &mut Frame, area: Rect, title: &str, body: &str) {
     f.render_widget(Clear, r);
     let lines = vec![
         Line::default(),
-        Line::from(Span::styled(
-            format!("  {}", body),
-            Style::default().fg(Color::White),
-        )),
+        Line::from(Span::styled(format!("  {}", body), Style::default().fg(Color::White))),
         Line::default(),
         Line::from(vec![
             Span::styled("  y ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
@@ -917,12 +973,13 @@ fn render_confirm_overlay(f: &mut Frame, area: Rect, title: &str, body: &str) {
         ]),
         Line::default(),
     ];
-    let block = Block::default()
-        .title(format!(" {} ", title))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
     f.render_widget(
-        Paragraph::new(Text::from(lines)).block(block),
+        Paragraph::new(Text::from(lines)).block(
+            Block::default()
+                .title(format!(" {} ", title))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        ),
         r,
     );
 }
@@ -930,11 +987,10 @@ fn render_confirm_overlay(f: &mut Frame, area: Rect, title: &str, body: &str) {
 fn render_dispatch_overlay(f: &mut Frame, area: Rect, app: &App) {
     let r = centered_rect(50, 7, area);
     f.render_widget(Clear, r);
-    let total_slots = app.slots.len();
     let lines = vec![
         Line::default(),
         Line::from(Span::styled(
-            format!("  Slot number (1-{}):", total_slots),
+            format!("  Slot number (1-{}):", MAX_SLOTS),
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
@@ -948,30 +1004,78 @@ fn render_dispatch_overlay(f: &mut Frame, area: Rect, app: &App) {
         )),
         Line::default(),
     ];
-    let block = Block::default()
-        .title(" DISPATCH INTO SLOT ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green));
     f.render_widget(
-        Paragraph::new(Text::from(lines)).block(block),
+        Paragraph::new(Text::from(lines)).block(
+            Block::default()
+                .title(" DISPATCH INTO SLOT ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        ),
+        r,
+    );
+}
+
+fn render_rename_overlay(f: &mut Frame, area: Rect, app: &App) {
+    let r = centered_rect(52, 8, area);
+    f.render_widget(Clear, r);
+    let target_g = app.target_global();
+    let current = app
+        .slots
+        .get(target_g)
+        .and_then(|s| s.as_ref())
+        .map(|a| a.display_name().to_string())
+        .unwrap_or_default();
+    let lines = vec![
+        Line::default(),
+        Line::from(Span::styled(
+            format!("  Current: {}", current),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            format!("  > {}_", app.input_buf),
+            Style::default().fg(Color::Green),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            "  Enter confirm    Esc cancel    empty = reset to NATO",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::default(),
+    ];
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).block(
+            Block::default()
+                .title(" RENAME AGENT ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        ),
         r,
     );
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+/// Compute PTY dimensions from terminal size.
+fn compute_pane_size(term_rows: u16, term_cols: u16) -> (u16, u16) {
+    // 3-row header + 1-row footer = 4 fixed rows; remaining split 2 ways vertically.
+    // Each pane: 2 border rows + 4 info strip rows = 6 overhead.
+    let pane_h = term_rows.saturating_sub(4) / 2;
+    let rows = pane_h.saturating_sub(6).max(10);
+    // Each pane is half the terminal width minus 2 for borders.
+    let cols = (term_cols / 2).saturating_sub(2).max(20);
+    (rows, cols)
+}
+
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Some(Commands::RegeneratePsk) => {
-            let psk = config::regenerate_psk();
-            println!("{psk}");
+            println!("{}", config::regenerate_psk());
             return Ok(());
         }
         Some(Commands::ShowPsk) => {
-            let cfg = config::load_or_create();
-            println!("{}", cfg.auth.psk);
+            println!("{}", config::load_or_create().auth.psk);
             return Ok(());
         }
         Some(Commands::Config) => {
@@ -981,10 +1085,9 @@ fn main() -> io::Result<()> {
         None => {}
     }
 
-    // Load (or create) config on startup.
     let cfg = config::load_or_create();
 
-    // dispatch-bgz.8: Start the WebSocket server; share state with the App for UI reads.
+    // Start the WebSocket server (dispatch-bgz.7).
     let ws_state: ws_server::SharedState = Arc::new(Mutex::new(ws_server::ConsoleState::new()));
     {
         let state = Arc::clone(&ws_state);
@@ -997,248 +1100,208 @@ fn main() -> io::Result<()> {
         });
     }
 
-    // dispatch-bgz.9: beads task lifecycle
-    // Slot 1 callsign is Alpha by convention (NATO phonetic alphabet, dispatch order)
-    const CALLSIGN: &str = "Alpha";
-    const PROMPT: &str = "PoC session: validate PTY + vt100 + ratatui";
+    // Determine initial pane size from the terminal.
+    let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((160, 40));
+    let (pane_rows, pane_cols) = compute_pane_size(term_rows, term_cols);
 
-    // 1. Create a typed task
-    let task_id = bd_create_task(PROMPT);
+    let mut app = App::new(
+        cfg.auth.psk.clone(),
+        ws_state,
+        pane_rows,
+        pane_cols,
+        cfg.tools.clone(),
+    );
 
-    // 2. Assign the task to this agent slot
-    if let Some(id) = &task_id {
-        bd_assign_task(id, CALLSIGN);
-    }
-
-    // dispatch-bgz.2: per-slot PTY Vec (one entry per slot in app.slots); slot 0 gets a PTY on startup
-    let max_agents = cfg.terminal.max_agents as usize;
-    let mut ptys: Vec<Option<SlotPty>> = (0..max_agents).map(|_| None).collect();
-    ptys[0] = SlotPty::spawn(PTY_ROWS, PTY_COLS, "claude");
-
-    // 3. Deliver prefixed prompt to slot 0's agent
-    if let Some(id) = &task_id {
-        if let Some(pty) = ptys[0].as_mut() {
+    // Dispatch slot 0 (Alpha) with claude on startup (dispatch-bgz.6).
+    let claude_cmd = app.tool_cmd("claude-code").to_string();
+    if let Some(mut slot) = dispatch_slot(0, "claude-code", &claude_cmd, pane_rows, pane_cols) {
+        // dispatch-bgz.9: beads task lifecycle on startup
+        const PROMPT: &str = "PoC session: validate PTY + vt100 + ratatui";
+        let task_id = bd_create_task(PROMPT);
+        if let Some(id) = &task_id {
+            bd_assign_task(id, &slot.callsign);
             let prefixed = format!("[Dispatch task {id}] {PROMPT}\r");
-            pty.write(prefixed.as_bytes());
+            let _ = slot.writer.write_all(prefixed.as_bytes());
+            let _ = slot.writer.flush();
+            slot.task_id = task_id;
         }
+        app.slots[0] = Some(slot);
     }
 
-    // Background thread: periodically fetch queued tasks from beads (dispatch-bgz.11)
+    // Background thread: fetch queued tasks every TASK_POLL_SECS (dispatch-bgz.11).
     let (tasks_tx, tasks_rx) = mpsc::channel::<Vec<QueuedTask>>();
     thread::spawn(move || loop {
-        let tasks = bd_fetch_queued();
-        let _ = tasks_tx.send(tasks);
+        let _ = tasks_tx.send(bd_fetch_queued());
         thread::sleep(Duration::from_secs(TASK_POLL_SECS));
     });
 
-    // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(
-        cfg.auth.psk.clone(),
-        cfg.terminal.max_agents as usize,
-        task_id.clone(),
-        ws_state,
-    );
+    let mut quit_requested = false;
 
-    // Track exit reason to determine task close vs reopen (dispatch-bgz.9)
-    let mut agent_terminated = false;
-
-    loop {
-        // dispatch-bgz.2: check for exited PTY slots; clear slot when done
-        let mut slot0_exited = false;
-        for i in 0..ptys.len() {
-            if ptys[i].as_ref().map(|p| p.is_exited()).unwrap_or(false) {
-                ptys[i] = None;
-                app.slots[i] = None;
-                if app.active_count > 0 {
-                    app.active_count -= 1;
-                }
-                if i == 0 {
-                    slot0_exited = true;
+    'main: loop {
+        // Close any slots whose child exited naturally (dispatch-bgz.9).
+        for i in 0..MAX_SLOTS {
+            if let Some(s) = &app.slots[i] {
+                if s.child_exited.load(Ordering::Relaxed) {
+                    let task_id = s.task_id.clone();
+                    app.slots[i] = None;
+                    if let Some(id) = task_id {
+                        bd_close_task(&id);
+                    }
                 }
             }
         }
-        if slot0_exited {
+
+        if quit_requested && app.active_count() == 0 {
             break;
         }
 
-        // Pull latest queued tasks from background thread (non-blocking, dispatch-bgz.11)
         while let Ok(tasks) = tasks_rx.try_recv() {
             app.queued_tasks = tasks;
         }
-
-        // dispatch-bgz.2: snapshot VT screen for each active slot
-        let vt_lines: Vec<Option<Vec<Line<'static>>>> =
-            ptys.iter().map(|p| p.as_ref().map(|p| p.screen_lines())).collect();
 
         terminal.draw(|f| {
             let full = f.area();
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3), // header bar
-                    Constraint::Min(0),    // quad pane
-                    Constraint::Length(1), // footer bar
+                    Constraint::Length(3),
+                    Constraint::Min(0),
+                    Constraint::Length(1),
                 ])
                 .split(full);
 
             render_header(f, chunks[0], &app);
-            render_panes(f, chunks[1], &app, vt_lines);
+            render_panes(f, chunks[1], &app);
             render_footer(f, chunks[2], &app);
 
-            // Overlays rendered on top of everything (dispatch-bgz.5)
             match app.overlay {
                 Overlay::None => {}
                 Overlay::Help => render_help_overlay(f, full),
                 Overlay::TaskList => render_task_list_overlay(f, full, &app),
                 Overlay::ConfirmQuit => render_confirm_overlay(
-                    f,
-                    full,
-                    "QUIT",
-                    "Agents are running. Really quit?",
+                    f, full, "QUIT", "Agents are running. Really quit?",
                 ),
                 Overlay::ConfirmTerminate => {
-                    let global = app.global_target();
-                    let callsign = match &app.slots[global] {
-                        Some(a) => a.callsign.clone(),
-                        None => format!("slot {}", global + 1),
-                    };
-                    render_confirm_overlay(
-                        f,
-                        full,
-                        "TERMINATE",
-                        &format!("Terminate {}?", callsign),
-                    );
+                    let target_g = app.target_global();
+                    let name = app.slots.get(target_g)
+                        .and_then(|s| s.as_ref())
+                        .map(|a| a.display_name().to_string())
+                        .unwrap_or_else(|| format!("slot {}", target_g + 1));
+                    render_confirm_overlay(f, full, "TERMINATE", &format!("Terminate {}?", name));
                 }
                 Overlay::DispatchSlot => render_dispatch_overlay(f, full, &app),
+                Overlay::Rename => render_rename_overlay(f, full, &app),
             }
         })?;
 
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
-                // ----------------------------------------------------------------
-                // dispatch-bgz.2: resize all active PTYs when the terminal resizes
-                // ----------------------------------------------------------------
-                Event::Resize(cols, rows) => {
-                    // Each pane is ~half the terminal width/height minus borders and info strip
-                    let pane_cols = (cols / 2).saturating_sub(2).max(20);
-                    let pane_rows = (rows.saturating_sub(4) / 2).saturating_sub(6).max(5);
-                    for pty in ptys.iter_mut().flatten() {
-                        pty.resize(pane_rows, pane_cols);
-                    }
+                // Terminal resize (dispatch-bgz.6)
+                Event::Resize(new_cols, new_rows) => {
+                    let (new_pane_rows, new_pane_cols) = compute_pane_size(new_rows, new_cols);
+                    app.pane_rows = new_pane_rows;
+                    app.pane_cols = new_pane_cols;
+                    resize_all_slots(
+                        &mut app.slots,
+                        PtySize { rows: new_pane_rows, cols: new_pane_cols, pixel_width: 0, pixel_height: 0 },
+                    );
                 }
 
                 Event::Key(key) => match app.mode {
-                    // ----------------------------------------------------------------
-                    // Input mode: keystrokes go to the PTY.
-                    // Escape is the only key the console intercepts.
-                    // Double-Escape passes one literal Escape byte to the PTY.
-                    // ----------------------------------------------------------------
+                    // Input mode: keystrokes forwarded to targeted PTY (dispatch-bgz.4)
                     Mode::Input => {
                         if key.code == KeyCode::Esc {
                             if app.last_was_escape {
-                                // Double-Escape: send one literal Escape to PTY, stay in Input mode.
-                                if let Some(pty) = ptys[app.global_target()].as_mut() {
-                                    pty.write(b"\x1b");
+                                let target_g = app.target_global();
+                                if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                    let _ = slot.writer.write_all(b"\x1b");
+                                    let _ = slot.writer.flush();
                                 }
                                 app.last_was_escape = false;
                             } else {
-                                // First Escape: wait to see if a second follows.
                                 app.last_was_escape = true;
                             }
-                            continue;
+                            continue 'main;
                         }
 
                         if app.last_was_escape {
-                            // Single Escape then non-Escape: exit input mode.
                             app.mode = Mode::Command;
                             app.last_was_escape = false;
-                            continue;
+                            continue 'main;
                         }
 
-                        // dispatch-bgz.2: forward input to the targeted slot's PTY
-                        if let Some(pty) = ptys[app.global_target()].as_mut() {
+                        let target_g = app.target_global();
+                        if let Some(Some(slot)) = app.slots.get_mut(target_g) {
                             let bytes = key_to_pty_bytes(&key);
                             if !bytes.is_empty() {
-                                pty.write(&bytes);
+                                let _ = slot.writer.write_all(&bytes);
+                                let _ = slot.writer.flush();
                             }
                         }
                     }
 
-                    // ----------------------------------------------------------------
-                    // Command mode: keystrokes control the console.
-                    // ----------------------------------------------------------------
+                    // Command mode (dispatch-bgz.5)
                     Mode::Command => {
-                        // If an overlay is active, route keys to the overlay handler.
                         if app.overlay != Overlay::None {
                             match app.overlay {
                                 Overlay::Help | Overlay::TaskList => {
-                                    // Any key dismisses these overlays.
                                     app.overlay = Overlay::None;
                                 }
+
                                 Overlay::ConfirmQuit => match key.code {
                                     KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                        agent_terminated = true;
-                                        break;
-                                    }
-                                    _ => {
+                                        if app.active_count() == 0 {
+                                            break 'main;
+                                        }
+                                        for i in 0..MAX_SLOTS {
+                                            if let Some(task_id) = terminate_slot(&mut app.slots[i]) {
+                                                bd_reopen_task(&task_id);
+                                            }
+                                        }
+                                        quit_requested = true;
                                         app.overlay = Overlay::None;
                                     }
+                                    _ => app.overlay = Overlay::None,
                                 },
+
                                 Overlay::ConfirmTerminate => match key.code {
                                     KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                        // dispatch-bgz.2: drop the slot's PTY on terminate
-                                        let global = app.global_target();
-                                        ptys[global] = None;
-                                        app.slots[global] = None;
-                                        if app.active_count > 0 {
-                                            app.active_count -= 1;
+                                        let target_g = app.target_global();
+                                        if let Some(task_id) = terminate_slot(&mut app.slots[target_g]) {
+                                            bd_reopen_task(&task_id);
                                         }
                                         app.overlay = Overlay::None;
                                     }
-                                    _ => {
-                                        app.overlay = Overlay::None;
-                                    }
+                                    _ => app.overlay = Overlay::None,
                                 },
+
                                 Overlay::DispatchSlot => match key.code {
                                     KeyCode::Esc => {
                                         app.input_buf.clear();
                                         app.overlay = Overlay::None;
                                     }
-                                    KeyCode::Backspace => {
-                                        app.input_buf.pop();
-                                    }
+                                    KeyCode::Backspace => { app.input_buf.pop(); }
                                     KeyCode::Enter => {
                                         if let Ok(n) = app.input_buf.trim().parse::<usize>() {
-                                            let total = app.slots.len();
-                                            if n >= 1 && n <= total {
-                                                let global = n - 1;
-                                                let page = global / 4;
-                                                let local_idx = global % 4;
-                                                // Auto-navigate to the page and target slot
+                                            if n >= 1 && n <= MAX_SLOTS {
+                                                let g = n - 1;
+                                                let page = g / SLOTS_PER_PAGE;
+                                                let local = g % SLOTS_PER_PAGE;
                                                 app.current_page = page;
-                                                app.target = local_idx;
-                                                // Dispatch: fill slot if empty
-                                                if app.slots[global].is_none() {
-                                                    let callsign = NATO
-                                                        .get(global % NATO.len())
-                                                        .unwrap_or(&"AGENT");
-                                                    let wall = Local::now().format("%H:%M").to_string();
-                                                    app.slots[global] = Some(AgentSlot {
-                                                        callsign: callsign.to_string(),
-                                                        tool: "claude-code".to_string(),
-                                                        task_id: None,
-                                                        dispatch_time: Instant::now(),
-                                                        dispatch_wall_str: wall,
-                                                    });
-                                                    app.active_count += 1;
-                                                    // dispatch-bgz.2: spawn PTY for the new slot
-                                                    ptys[global] = SlotPty::spawn(PTY_ROWS, PTY_COLS, "claude");
+                                                app.target = local;
+                                                if app.slots[g].is_none() {
+                                                    let cmd = app.tool_cmd("claude-code").to_string();
+                                                    if let Some(slot) = dispatch_slot(
+                                                        g, "claude-code", &cmd, app.pane_rows, app.pane_cols,
+                                                    ) {
+                                                        app.slots[g] = Some(slot);
+                                                    }
                                                 }
                                             }
                                         }
@@ -1246,138 +1309,144 @@ fn main() -> io::Result<()> {
                                         app.overlay = Overlay::None;
                                     }
                                     KeyCode::Char(c) if c.is_ascii_digit() => {
-                                        app.input_buf.push(c);
+                                        if app.input_buf.len() < 2 {
+                                            app.input_buf.push(c);
+                                        }
                                     }
                                     _ => {}
                                 },
+
+                                // Rename overlay (dispatch-bgz.3)
+                                Overlay::Rename => match key.code {
+                                    KeyCode::Esc => {
+                                        app.input_buf.clear();
+                                        app.overlay = Overlay::None;
+                                    }
+                                    KeyCode::Backspace => { app.input_buf.pop(); }
+                                    KeyCode::Enter => {
+                                        let name = app.input_buf.trim().to_string();
+                                        let target_g = app.target_global();
+                                        if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                            if name.is_empty() {
+                                                slot.custom_name = None; // reset to NATO
+                                            } else if is_valid_callsign(&name) {
+                                                slot.custom_name = Some(name);
+                                            }
+                                        }
+                                        app.input_buf.clear();
+                                        app.overlay = Overlay::None;
+                                    }
+                                    KeyCode::Char(c) if !c.is_control() => {
+                                        if app.input_buf.len() < 20 {
+                                            app.input_buf.push(c);
+                                        }
+                                    }
+                                    _ => {}
+                                },
+
                                 Overlay::None => unreachable!(),
                             }
                         } else {
                             match key.code {
-                                // Quit — confirm if any agents are running
                                 KeyCode::Char('q') => {
-                                    if app.active_count > 0 {
+                                    if app.active_count() > 0 {
                                         app.overlay = Overlay::ConfirmQuit;
                                     } else {
-                                        break;
+                                        break 'main;
                                     }
                                 }
 
-                                // Enter input mode
                                 KeyCode::Enter | KeyCode::Char('i') => {
                                     app.mode = Mode::Input;
                                     app.last_was_escape = false;
                                 }
 
-                                // Select target slot (1-4 on current page)
                                 KeyCode::Char('1') => app.target = 0,
                                 KeyCode::Char('2') => app.target = 1,
                                 KeyCode::Char('3') => app.target = 2,
                                 KeyCode::Char('4') => app.target = 3,
 
-                                // Cycle target: Tab = next slot across all pages
                                 KeyCode::Tab => {
-                                    let total = app.total_pages * 4;
-                                    let global = app.current_page * 4 + app.target;
+                                    let total = app.total_pages() * SLOTS_PER_PAGE;
+                                    let global = app.current_page * SLOTS_PER_PAGE + app.target;
                                     let next = (global + 1) % total;
-                                    app.current_page = next / 4;
-                                    app.target = next % 4;
+                                    app.current_page = next / SLOTS_PER_PAGE;
+                                    app.target = next % SLOTS_PER_PAGE;
                                 }
 
-                                // Cycle target: Shift+Tab = prev slot across all pages
                                 KeyCode::BackTab => {
-                                    let total = app.total_pages * 4;
-                                    let global = app.current_page * 4 + app.target;
+                                    let total = app.total_pages() * SLOTS_PER_PAGE;
+                                    let global = app.current_page * SLOTS_PER_PAGE + app.target;
                                     let prev = (global + total - 1) % total;
-                                    app.current_page = prev / 4;
-                                    app.target = prev % 4;
+                                    app.current_page = prev / SLOTS_PER_PAGE;
+                                    app.target = prev % SLOTS_PER_PAGE;
                                 }
 
-                                // Page navigation: ] or Shift+Right
                                 KeyCode::Char(']') => {
-                                    if app.current_page + 1 < app.total_pages {
+                                    let total = app.total_pages();
+                                    if app.current_page + 1 < total {
                                         app.current_page += 1;
                                     }
                                 }
-                                KeyCode::Right
-                                    if key.modifiers.contains(KeyModifiers::SHIFT) =>
-                                {
-                                    if app.current_page + 1 < app.total_pages {
+                                KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                                    let total = app.total_pages();
+                                    if app.current_page + 1 < total {
                                         app.current_page += 1;
                                     }
                                 }
 
-                                // Page navigation: [ or Shift+Left
                                 KeyCode::Char('[') => {
                                     if app.current_page > 0 {
                                         app.current_page -= 1;
                                     }
                                 }
-                                KeyCode::Left
-                                    if key.modifiers.contains(KeyModifiers::SHIFT) =>
-                                {
+                                KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
                                     if app.current_page > 0 {
                                         app.current_page -= 1;
                                     }
                                 }
 
-                                // Dispatch into first empty slot (across all pages)
+                                // Dispatch into first empty slot (dispatch-bgz.6)
                                 KeyCode::Char('n') => {
-                                    if let Some(global) =
-                                        app.slots.iter().position(|s| s.is_none())
-                                    {
-                                        let callsign = NATO
-                                            .get(global % NATO.len())
-                                            .unwrap_or(&"AGENT");
-                                        let wall = Local::now().format("%H:%M").to_string();
-                                        app.slots[global] = Some(AgentSlot {
-                                            callsign: callsign.to_string(),
-                                            tool: "claude-code".to_string(),
-                                            task_id: None,
-                                            dispatch_time: Instant::now(),
-                                            dispatch_wall_str: wall,
-                                        });
-                                        app.active_count += 1;
-                                        // Auto-navigate to the page containing the new slot
-                                        app.current_page = global / 4;
-                                        app.target = global % 4;
-                                        // dispatch-bgz.2: spawn PTY for the new slot
-                                        ptys[global] = SlotPty::spawn(PTY_ROWS, PTY_COLS, "claude");
+                                    if let Some(g) = app.slots.iter().position(|s| s.is_none()) {
+                                        let cmd = app.tool_cmd("claude-code").to_string();
+                                        if let Some(slot) = dispatch_slot(
+                                            g, "claude-code", &cmd, app.pane_rows, app.pane_cols,
+                                        ) {
+                                            let page = g / SLOTS_PER_PAGE;
+                                            let local = g % SLOTS_PER_PAGE;
+                                            app.slots[g] = Some(slot);
+                                            app.current_page = page;
+                                            app.target = local;
+                                        }
                                     }
                                 }
 
-                                // Dispatch into specific slot (shows prompt)
                                 KeyCode::Char('N') => {
                                     app.input_buf.clear();
                                     app.overlay = Overlay::DispatchSlot;
                                 }
 
-                                // Terminate target agent (confirm first)
+                                // Terminate target agent (dispatch-bgz.6)
                                 KeyCode::Char('x') => {
-                                    if app.slots[app.global_target()].is_some() {
+                                    let target_g = app.target_global();
+                                    if app.slots[target_g].is_some() {
                                         app.overlay = Overlay::ConfirmTerminate;
                                     }
                                 }
 
-                                // Rename target agent (stub — opens input mode for now)
+                                // Rename target agent (dispatch-bgz.3)
                                 KeyCode::Char('R') => {
-                                    // Stub: rename not yet implemented
+                                    let target_g = app.target_global();
+                                    if app.slots[target_g].is_some() {
+                                        app.input_buf.clear();
+                                        app.overlay = Overlay::Rename;
+                                    }
                                 }
 
-                                // Task list overlay
-                                KeyCode::Char('t') => {
-                                    app.overlay = Overlay::TaskList;
-                                }
-
-                                // Toggle PSK expansion
-                                KeyCode::Char('p') => {
-                                    app.psk_expanded = !app.psk_expanded;
-                                }
-
-                                // Help overlay
-                                KeyCode::Char('?') => {
-                                    app.overlay = Overlay::Help;
-                                }
+                                KeyCode::Char('t') => app.overlay = Overlay::TaskList,
+                                KeyCode::Char('p') => app.psk_expanded = !app.psk_expanded,
+                                KeyCode::Char('?') => app.overlay = Overlay::Help,
 
                                 _ => {}
                             }
@@ -1390,23 +1459,9 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // Restore terminal
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-
-    // 5. Task lifecycle close/reopen based on exit reason (dispatch-bgz.9)
-    if let Some(id) = &task_id {
-        if agent_terminated {
-            // Agent was killed by user — reopen task so another agent can pick it up
-            bd_reopen_task(id);
-            println!("Agent terminated. Task {id} reopened as open.");
-        } else {
-            // Agent's PTY closed naturally — mark task complete
-            bd_close_task(id);
-            println!("Session complete. Task {id} closed.");
-        }
-    }
 
     Ok(())
 }
