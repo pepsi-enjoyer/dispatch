@@ -13,15 +13,15 @@ Dispatch has two components:
 
 ```
 ┌──────────────┐     WebSocket (LAN, PSK)     ┌──────────────────┐
-│  Dispatch    │  <------------------------->  │  Dispatch        │
-│  Radio       │                               │  Console         │
-│  (Android)   │                               │  (PC TUI)        │
-│              │                               │                  │
-│  Volume keys │                               │  4x embedded     │
-│  Speech-to-  │                               │  terminals (PTY) │
-│  text, voice │                               │  Git worktrees   │
-│  commands    │                               │  .dispatch/      │
-└──────────────┘                               └──────────────────┘
+│  Dispatch    │  <-------------------------> │  Dispatch        │
+│  Radio       │                              │  Console         │
+│  (Android)   │                              │  (PC TUI)        │
+│              │                              │                  │
+│  Volume keys │                              │  4x embedded     │
+│  Speech-to-  │                              │  terminals (PTY) │
+│  text, voice │                              │  Git worktrees   │
+│  commands    │                              │  .dispatch/      │
+└──────────────┘                              └──────────────────┘
 ```
 
 ## Repository Structure
