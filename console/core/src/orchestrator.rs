@@ -124,9 +124,8 @@ pub fn spawn(system_prompt: &str, cwd: &str) -> Option<Orchestrator> {
         "-p",
         "--output-format", "stream-json",
         "--input-format", "stream-json",
-        "--verbose",
         "--no-config",
-        "--max-turns", "0",
+        "--tools", "",
         "--system-prompt", system_prompt,
     ]);
     cmd.current_dir(cwd);
