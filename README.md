@@ -102,6 +102,7 @@ The console displays four agent panes at a time in a 2x2 grid with a scrolling t
 | `R`               | Rename agent in targeted slot                       |
 | `S`               | Rescan repos (multi-repo mode)                      |
 | `t`               | Show task list overlay                              |
+| `h`               | Show prompt history (browse and re-send)            |
 | `o`               | Toggle orchestrator view (event log)                |
 | `p`               | Show/hide full PSK                                  |
 | `Q`               | Show QR code for radio pairing                      |
