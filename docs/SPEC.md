@@ -393,6 +393,23 @@ Pressing `o` in command mode replaces the 2x2 agent grid with a full-height scro
 
 Pressing `o` again returns to the agent grid. While in the orchestrator view, `Up`/`Down` and `PageUp`/`PageDown` scroll through history. The footer shows contextual hints for the active view mode.
 
+### Prompt History and Logging
+
+All voice prompts from the radio and keyboard input submitted in input mode are recorded with timestamps to `.dispatch/prompt_history.log`. The log is append-only, human-readable, and persists across sessions.
+
+**Log format:**
+
+```
+[14:32:05] VOICE -> ALPHA: "refactor the auth module"
+[14:35:12] KEYBOARD -> ALPHA: "fix the typo in line 42"
+[14:38:00] VOICE -> planner: "set up CI pipeline for all microservices"
+[14:40:15] VOICE -> queued: "add rate limiting to the API"
+```
+
+**Keyboard input tracking:** in input mode, the console maintains a shadow buffer of typed characters. When Enter is pressed, the accumulated text is saved to the history log. The shadow buffer is cleared on mode exit (Escape).
+
+**History overlay:** pressing `h` in command mode opens a scrollable prompt history overlay. Each entry shows timestamp, source (MIC for voice, KBD for keyboard), target agent, and prompt text. Navigation: `j`/`k` or `Up`/`Down` to scroll, `g`/`G` for top/bottom, `Enter` to re-send the selected prompt to the current target, `Esc` to close.
+
 ---
 
 ## Protocol
@@ -720,6 +737,7 @@ While in input mode, `Escape` is the only key intercepted by the console. Everyt
 | `R`               | Rename agent in currently targeted slot                      |
 | `S`               | Rescan repos (multi-repo mode only)                          |
 | `t`               | Show task list overlay (plan, active, queued, completed)             |
+| `h`               | Show prompt history overlay (browse and re-send past prompts) |
 | `o`               | Toggle orchestrator view (replaces agent grid with event log) |
 | `p`               | Show/hide full PSK                                           |
 | `Q`               | Show QR code overlay for radio pairing                       |
@@ -1087,7 +1105,7 @@ Radio:
 - Agent busy/idle detection: refine idle prompt patterns and completion timeout per tool as edge cases surface in testing.
 - ~~TLS on the WebSocket.~~ (done)
 - ~~AccessibilityService for screen-off volume button capture.~~ (done)
-- Console prompt history and logging.
+- ~~Console prompt history and logging.~~ (done)
 - `.dispatch/tasks.md` pruning for long-running projects (archive completed tasks).
 - Wear OS companion: minimal wrist app (`radio/wear/` module) with status glance (connection state, current target, active agents), crown rotation for target cycling, and tap-to-dispatch trigger. Standalone APK, same WebSocket protocol as the phone radio. Settings (host, port, PSK) via long-press.
 

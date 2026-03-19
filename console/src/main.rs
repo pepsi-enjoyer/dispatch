@@ -25,6 +25,7 @@
 // dispatch-fnx: headless planner — spawns claude -p to decompose complex prompts into task plans
 // dispatch-ct2.4: terminal scrollback in panes — PgUp/PgDn in command mode, configurable buffer
 // dispatch-sa1: multi-repo support — detect non-repo parent, scan children for git repos
+// dispatch-ct2.8: prompt history — log voice/keyboard prompts to file, browsable history overlay
 //
 // Layout:
 //   Header bar  : DISPATCH title, radio state, PSK, agent count, PAGE X/Y, clock
@@ -187,7 +188,8 @@ enum Overlay {
     ConfirmTerminate,
     DispatchSlot,
     Rename,
-    RepoSelect,  // dispatch-sa1: pick which repo to dispatch into
+    RepoSelect,      // dispatch-sa1: pick which repo to dispatch into
+    PromptHistory,    // dispatch-ct2.8: browsable prompt history
 }
 
 #[derive(Clone, Copy)]
@@ -252,6 +254,21 @@ struct PlannerState {
     receiver: mpsc::Receiver<Option<String>>,
 }
 
+/// A recorded prompt for the history log (dispatch-ct2.8).
+#[derive(Clone)]
+struct PromptEntry {
+    time: String,
+    source: PromptSource,
+    target: String,
+    text: String,
+}
+
+#[derive(Clone, Copy)]
+enum PromptSource {
+    Voice,
+    Keyboard,
+}
+
 struct App {
     slots: [Option<SlotState>; MAX_SLOTS],
     current_page: usize,
@@ -298,6 +315,10 @@ struct App {
     orch_scroll: usize, // scroll offset from bottom
     // TLS cert fingerprint for QR pairing (dispatch-ct2.6)
     tls_fingerprint: String,
+    // Prompt history and logging (dispatch-ct2.8)
+    prompt_history: Vec<PromptEntry>,
+    input_line_buf: String,       // shadow buffer tracking keyboard input in input mode
+    history_scroll: usize,        // selected index in the prompt history overlay
 }
 
 impl App {
@@ -347,6 +368,9 @@ impl App {
             orch_log: Vec::new(),
             orch_scroll: 0,
             tls_fingerprint,
+            prompt_history: Vec::new(),
+            input_line_buf: String::new(),
+            history_scroll: 0,
         }
     }
 
@@ -359,6 +383,34 @@ impl App {
             self.orch_log.remove(0);
             self.orch_scroll = self.orch_scroll.saturating_sub(1);
         }
+    }
+
+    /// Record a prompt to in-memory history and append to the log file (dispatch-ct2.8).
+    fn log_prompt(&mut self, source: PromptSource, target: &str, text: &str) {
+        let time = Local::now().format("%H:%M:%S").to_string();
+        let entry = PromptEntry {
+            time: time.clone(),
+            source,
+            target: target.to_string(),
+            text: text.to_string(),
+        };
+        self.prompt_history.push(entry);
+
+        // Append to .dispatch/prompt_history.log
+        let repo = self.default_repo_root().to_string();
+        let dispatch_dir = format!("{}/.dispatch", repo);
+        let _ = std::fs::create_dir_all(&dispatch_dir);
+        let log_path = format!("{}/prompt_history.log", dispatch_dir);
+        let label = match source {
+            PromptSource::Voice => "VOICE",
+            PromptSource::Keyboard => "KEYBOARD",
+        };
+        let line = format!("[{}] {} -> {}: \"{}\"\n", time, label, target, text);
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
     }
 
     fn global_idx(&self, local_idx: usize) -> usize {
@@ -1936,7 +1988,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             let hints = if app.view_mode == ViewMode::Orchestrator {
                 "│ o agents │ Up/Down scroll │ PgUp/PgDn │ q quit │ ? help"
             } else {
-                "│ i/Enter input │ 1-4 slot │ Tab cycle │ ]/[ page │ PgUp/Dn scroll │ n/N dispatch │ x term │ R rename │ t tasks │ o orch │ p psk │ q quit │ ? help"
+                "│ i/Enter input │ 1-4 slot │ Tab cycle │ ]/[ page │ PgUp/Dn scroll │ n/N dispatch │ x term │ R rename │ t tasks │ h history │ o orch │ p psk │ q quit │ ? help"
             };
             let view_indicator = match app.view_mode {
                 ViewMode::Agents => "",
@@ -1986,7 +2038,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn render_help_overlay(f: &mut Frame, area: Rect) {
-    let r = centered_rect(52, 26, area);
+    let r = centered_rect(52, 27, area);
     f.render_widget(Clear, r);
     let lines = vec![
         Line::from(Span::styled(
@@ -2007,6 +2059,7 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::raw("  R            Rename target agent")),
         Line::from(Span::raw("  S            Rescan repos (multi-repo mode)")),
         Line::from(Span::raw("  t            Task list overlay")),
+        Line::from(Span::raw("  h            Prompt history")),
         Line::from(Span::raw("  o            Toggle orchestrator view")),
         Line::from(Span::raw("  p            Toggle PSK visibility")),
         Line::from(Span::raw("  Q            Show QR code for radio pairing")),
@@ -2404,6 +2457,93 @@ fn render_repo_select_overlay(f: &mut Frame, area: Rect, app: &App) {
                 .title(" SELECT REPO ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        r,
+    );
+}
+
+/// Render the prompt history overlay (dispatch-ct2.8).
+fn render_prompt_history_overlay(f: &mut Frame, area: Rect, app: &App) {
+    let max_h = area.height.saturating_sub(4).min(30);
+    let max_w = area.width.saturating_sub(4).min(80);
+    let r = centered_rect(max_w, max_h, area);
+    f.render_widget(Clear, r);
+
+    let inner_height = max_h.saturating_sub(4) as usize; // borders + hint line
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if app.prompt_history.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "  (no prompts recorded yet)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        // Show entries centered around the selected one
+        let total = app.prompt_history.len();
+        let start = if app.history_scroll + inner_height / 2 >= total {
+            total.saturating_sub(inner_height)
+        } else {
+            app.history_scroll.saturating_sub(inner_height / 2)
+        };
+        let end = (start + inner_height).min(total);
+
+        for i in start..end {
+            let entry = &app.prompt_history[i];
+            let label = match entry.source {
+                PromptSource::Voice => "MIC",
+                PromptSource::Keyboard => "KBD",
+            };
+            let selected = i == app.history_scroll;
+            let marker = if selected { ">" } else { " " };
+            let text = truncate(&entry.text, (max_w as usize).saturating_sub(22));
+            let style = if selected {
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {} ", marker), style),
+                Span::styled(
+                    format!("{} ", entry.time),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{:<3} ", label),
+                    match entry.source {
+                        PromptSource::Voice => Style::default().fg(Color::Green),
+                        PromptSource::Keyboard => Style::default().fg(Color::Cyan),
+                    },
+                ),
+                Span::styled(
+                    format!("{:<8} ", truncate(&entry.target, 8)),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(text, style),
+            ]));
+        }
+    }
+
+    // Pad remaining height
+    while lines.len() < inner_height {
+        lines.push(Line::default());
+    }
+
+    // Hint line
+    lines.push(Line::from(Span::styled(
+        "  j/k navigate    Enter re-send    g/G top/bottom    Esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).block(
+            Block::default()
+                .title(Span::styled(
+                    " PROMPT HISTORY ",
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
         ),
         r,
     );
@@ -2902,6 +3042,12 @@ fn main() -> io::Result<()> {
                 ws_server::WsEvent::AutoDispatch { slot, prompt } => {
                     app.push_orch(OrchestratorEventKind::VoiceTranscript { text: prompt.clone() });
                     let g = (slot as usize).saturating_sub(1);
+                    // dispatch-ct2.8: log voice prompt
+                    let voice_target = app.slots.get(g)
+                        .and_then(|s| s.as_ref())
+                        .map(|s| s.display_name().to_string())
+                        .unwrap_or_else(|| NATO.get(g).unwrap_or(&"?").to_string());
+                    app.log_prompt(PromptSource::Voice, &voice_target, &prompt);
                     let target_repo = app.default_repo_root().to_string();
                     if g < MAX_SLOTS {
                         // Spawn a PTY if the slot is empty.
@@ -2948,6 +3094,7 @@ fn main() -> io::Result<()> {
                 }
                 ws_server::WsEvent::QueueTask { prompt } => {
                     app.push_orch(OrchestratorEventKind::VoiceTranscript { text: prompt.clone() });
+                    app.log_prompt(PromptSource::Voice, "queued", &prompt);
                     let target_repo = app.default_repo_root().to_string();
                     // Create an open task in .dispatch/tasks.md; it will
                     // surface in the next poll and be picked up when a slot frees.
@@ -2958,6 +3105,7 @@ fn main() -> io::Result<()> {
                 }
                 ws_server::WsEvent::PlanRequest { prompt } => {
                     app.push_orch(OrchestratorEventKind::VoiceTranscript { text: prompt.clone() });
+                    app.log_prompt(PromptSource::Voice, "planner", &prompt);
                     let target_repo = app.default_repo_root().to_string();
                     // dispatch-fnx: spawn a headless planner for complex prompts.
                     if app.planner.is_none() {
@@ -3022,6 +3170,7 @@ fn main() -> io::Result<()> {
                 Overlay::DispatchSlot => render_dispatch_overlay(f, full, &app),
                 Overlay::Rename => render_rename_overlay(f, full, &app),
                 Overlay::RepoSelect => render_repo_select_overlay(f, full, &app),
+                Overlay::PromptHistory => render_prompt_history_overlay(f, full, &app),
             }
         })?;
 
@@ -3058,7 +3207,29 @@ fn main() -> io::Result<()> {
                         if app.last_was_escape {
                             app.mode = Mode::Command;
                             app.last_was_escape = false;
+                            app.input_line_buf.clear(); // dispatch-ct2.8
                             continue 'main;
+                        }
+
+                        // dispatch-ct2.8: shadow-track keyboard input for history
+                        match key.code {
+                            KeyCode::Enter => {
+                                let text = app.input_line_buf.trim().to_string();
+                                if !text.is_empty() {
+                                    let target_g = app.target_global();
+                                    let target_name = app.slots.get(target_g)
+                                        .and_then(|s| s.as_ref())
+                                        .map(|s| s.display_name().to_string())
+                                        .unwrap_or_else(|| format!("slot-{}", target_g + 1));
+                                    app.log_prompt(PromptSource::Keyboard, &target_name, &text);
+                                }
+                                app.input_line_buf.clear();
+                            }
+                            KeyCode::Backspace => { app.input_line_buf.pop(); }
+                            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.input_line_buf.push(c);
+                            }
+                            _ => {}
                         }
 
                         let target_g = app.target_global();
@@ -3240,6 +3411,42 @@ fn main() -> io::Result<()> {
                                     _ => {}
                                 },
 
+                                // Prompt history overlay (dispatch-ct2.8)
+                                Overlay::PromptHistory => match key.code {
+                                    KeyCode::Esc | KeyCode::Char('h') => {
+                                        app.overlay = Overlay::None;
+                                    }
+                                    KeyCode::Char('j') | KeyCode::Down => {
+                                        if !app.prompt_history.is_empty() && app.history_scroll + 1 < app.prompt_history.len() {
+                                            app.history_scroll += 1;
+                                        }
+                                    }
+                                    KeyCode::Char('k') | KeyCode::Up => {
+                                        app.history_scroll = app.history_scroll.saturating_sub(1);
+                                    }
+                                    KeyCode::Char('G') => {
+                                        if !app.prompt_history.is_empty() {
+                                            app.history_scroll = app.prompt_history.len() - 1;
+                                        }
+                                    }
+                                    KeyCode::Char('g') => {
+                                        app.history_scroll = 0;
+                                    }
+                                    KeyCode::Enter => {
+                                        // Re-send the selected prompt to the current target
+                                        if let Some(entry) = app.prompt_history.get(app.history_scroll).cloned() {
+                                            let target_g = app.target_global();
+                                            if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                                let with_enter = format!("{}\r", entry.text);
+                                                let _ = slot.writer.write_all(with_enter.as_bytes());
+                                                let _ = slot.writer.flush();
+                                            }
+                                            app.overlay = Overlay::None;
+                                        }
+                                    }
+                                    _ => {}
+                                },
+
                                 Overlay::None => unreachable!(),
                             }
                         } else {
@@ -3260,6 +3467,7 @@ fn main() -> io::Result<()> {
                                     }
                                     app.mode = Mode::Input;
                                     app.last_was_escape = false;
+                                    app.input_line_buf.clear(); // dispatch-ct2.8
                                 }
 
                                 KeyCode::Char('1') => app.target = 0,
@@ -3364,6 +3572,12 @@ fn main() -> io::Result<()> {
                                     }
                                     app.overlay = Overlay::TaskList;
                                 }
+                                // Prompt history overlay (dispatch-ct2.8)
+                                KeyCode::Char('h') => {
+                                    app.history_scroll = 0;
+                                    app.overlay = Overlay::PromptHistory;
+                                }
+
                                 KeyCode::Char('p') => app.psk_expanded = !app.psk_expanded,
                                 KeyCode::Char('Q') => app.overlay = Overlay::QrCode,
                                 KeyCode::Char('?') => app.overlay = Overlay::Help,
