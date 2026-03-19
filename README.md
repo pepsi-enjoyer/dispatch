@@ -77,15 +77,16 @@ The PSK is displayed in the console header bar. You'll need it to connect the ra
 ### Radio (Android)
 
 1. Open the `radio/` directory in Android Studio (File > Open, select the `radio/` folder).
-2. On your phone, enable Developer Options (Settings > About phone > tap "Build number" 7 times).
-3. Connect your phone to Android Studio using one of these methods:
-   - **Wi-Fi (Android 11+)**: on your phone, go to Settings > Developer options > Wireless debugging and enable it. In Android Studio, open the device dropdown in the toolbar and select **Pair Devices Using Wi-Fi**. Pair using the QR code or pairing code.
-   - **USB**: plug in your phone via USB and enable USB debugging (Settings > Developer options > USB debugging). Your device appears in the dropdown automatically.
-4. Select your device from the device dropdown in the toolbar and click **Run** (green play button, or `Shift+F10`). This builds and installs the app.
-5. Pair the radio app to the Dispatch console using one of these methods:
-   - **QR code (recommended)**: press `Q` in the console to show a QR code, then tap the gear icon in the radio app and scan it.
-   - **mDNS auto-discovery**: tap **DISCOVER CONSOLE** in the radio's settings screen.
-   - **Manual**: enter the console's IP address, port, and PSK in the radio's settings screen. The PSK is shown in the console header bar.
+2. Android Studio will start downloading dependencies and syncing the project automatically. You'll see a progress bar at the bottom of the window -- wait for it to finish. This can take a few minutes the first time. If it doesn't start automatically, click the elephant icon with a blue arrow in the toolbar (Sync Project with Gradle Files), or go to File > Sync Project with Gradle Files. When sync is done, the toolbar dropdown that said "Add Configuration" will now say **app**.
+3. On your phone, enable Developer Options: go to Settings > About phone and tap "Build number" 7 times until it says "You are now a developer."
+4. Connect your phone to Android Studio using either method:
+   - **Wi-Fi (Android 11+)**: on your phone, go to Settings > Developer options > Wireless debugging and toggle it on. In Android Studio, go to the menu bar: View > Tool Windows > Running Devices. In the Running Devices panel, click the **+** button and select **Pair Devices Using Wi-Fi**. Choose either QR code or pairing code and follow the prompts to pair.
+   - **USB**: plug your phone into your PC via USB cable. On your phone, go to Settings > Developer options and enable USB debugging. Tap "Allow" on the prompt that appears on your phone.
+5. In the toolbar, you'll see two dropdowns side by side: one says **app** (the run configuration) and one shows available devices. Select your phone from the device dropdown, then click the green play button to the right of it. Android Studio will build and install the app on your phone.
+6. Once the app is running on your phone, pair it to the Dispatch console:
+   - **QR code (recommended)**: press `Q` in the Dispatch console to show a QR code. In the radio app on your phone, tap the gear icon in the top-right corner to open settings, then scan the QR code.
+   - **mDNS auto-discovery**: in the radio app settings, tap **DISCOVER CONSOLE** to auto-detect the console on your network.
+   - **Manual**: in the radio app settings, enter the console's IP address, port, and PSK. The PSK is shown in the console header bar.
 
 ## Usage
 
