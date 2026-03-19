@@ -37,7 +37,8 @@ dispatch/
   docs/
     SPEC.md            # Full system specification
     ARCHITECTURE.md    # High-level architecture overview
-    CONSOLE.md         # Console task management reference
+    ORCHESTRATOR.md    # Persistent LLM orchestrator behavior
+    CONSOLE.md         # Console runtime reference
     AGENTS.md          # Template injected into agent prompts
   README.md
 ```
@@ -186,16 +187,16 @@ Tasks are tracked in `.dispatch/tasks.md` at the repo root. The console orchestr
 
 ### Planning
 
-When a voice prompt describes a complex task (e.g. "refactor the auth system"), the console spawns a headless planner agent to decompose it:
+When a voice prompt describes a complex task (e.g. "refactor the auth system"), the orchestrator calls the `plan` tool to spawn a headless planner agent:
 
-1. **Planner dispatch**: the console spawns a temporary agent (no pane, no slot consumed) with the prompt and instructions to write a plan to `.dispatch/tasks.md`.
+1. **Planner dispatch**: the orchestrator calls `plan(repo, prompt)`. The console spawns a temporary agent (no pane, no slot consumed) with the prompt and instructions to write a plan to `.dispatch/tasks.md`.
 2. **Plan output**: the planner writes the task breakdown with IDs, descriptions, and dependency arrows.
-3. **Planner exits**: once `.dispatch/tasks.md` is written, the planner process terminates.
-4. **Dispatch begins**: the console reads the plan and starts dispatching worker agents for unblocked tasks.
+3. **Planner exits**: once `.dispatch/tasks.md` is written, the planner process terminates. The console notifies the orchestrator.
+4. **Dispatch begins**: the orchestrator calls `dispatch` for each unblocked task.
 
 The ticker line (see [Ticker](#ticker)) shows planner progress in real-time.
 
-For simple one-off prompts (e.g. "Alpha, fix this typo"), no planning step occurs -- the console creates a single task and dispatches directly.
+For simple one-off prompts (e.g. "Alpha, fix this typo"), the orchestrator calls `dispatch` directly without planning. See [ORCHESTRATOR.md](ORCHESTRATOR.md) for the full decision-making logic.
 
 ### Git Worktrees
 
