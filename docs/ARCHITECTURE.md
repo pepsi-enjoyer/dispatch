@@ -10,10 +10,10 @@ High-level architecture of the Dispatch system.
 │  Radio       │                               │                          │
 │  (Android)   │                               │  ┌─────────────────┐    │
 │              │                               │  │  Orchestrator    │    │
-│  Voice input │                               │  │  - Task planner  │    │
-│  Command     │                               │  │  - .dispatch/tasks.md r/w  │    │
-│  parser      │                               │  │  - Worktree mgmt │    │
-│              │                               │  │  - Merge logic   │    │
+│  Voice input │                               │  │  (persistent LLM)│    │
+│  Command     │                               │  │  - Tool calls    │    │
+│  parser      │                               │  │  - Voice interp  │    │
+│              │                               │  │  - Dispatch/merge│    │
 │              │                               │  └────────┬────────┘    │
 │              │                               │           │             │
 │              │                               │  ┌────────▼────────┐    │
@@ -34,19 +34,18 @@ High-level architecture of the Dispatch system.
 
 ### Orchestrator
 
-The central coordinator. It never appears as a visible pane -- it runs inside the console process itself.
+A persistent LLM agent that acts as the central decision-maker. It runs headlessly inside the console process (no visible pane) for the entire session. The console forwards voice transcripts and completion events to the orchestrator, and the orchestrator issues tool calls that the console executes.
 
 **Responsibilities:**
-- Receive voice commands and keyboard input.
-- Decide whether a prompt needs planning (complex task) or direct dispatch (simple prompt).
-- Spawn headless planner agents for task decomposition.
-- Read/write `.dispatch/tasks.md` to track the task plan and progress.
-- Create git worktrees for new tasks.
-- Assign tasks to idle agent slots.
-- Detect task completion (idle prompt patterns, inactivity timeout).
+- Interpret voice transcripts and decide what action to take.
+- Dispatch agents into repositories to work on tasks.
+- Decompose complex tasks into subtasks via the headless planner.
 - Merge completed worktree branches back to main.
-- Dispatch the next unblocked task when a dependency clears.
-- Push messages to the ticker.
+- Terminate stuck or unneeded agents.
+- Send follow-up messages to running agents.
+- React to completion and conflict events by dispatching next tasks.
+
+See ORCHESTRATOR.md for the full specification including system prompt, tools, and decision-making logic.
 
 ### Agent Slots
 
@@ -195,7 +194,7 @@ WebSocket send to console
 
 1. **Worktree-per-task, not worktree-per-agent.** Agents are ephemeral; tasks are the unit of work. If an agent is terminated mid-task, the worktree survives and can be reassigned.
 
-2. **Console is the single coordinator.** Agents do not read `.dispatch/tasks.md` or manage their own lifecycle. The console holds all state, serializes all `.dispatch/tasks.md` writes, and orchestrates merges. No race conditions.
+2. **LLM orchestrator, thin console.** The orchestrator is a persistent LLM that makes all decisions. The console is a thin runtime that executes tool calls, manages PTYs, and renders the TUI. The console holds no decision logic -- it serializes `.dispatch/tasks.md` writes and reports events to the orchestrator.
 
 3. **Headless planner.** The planner agent is invisible -- no pane, no slot consumed. It runs, writes the plan, exits. This keeps the quad panes reserved for actual work.
 

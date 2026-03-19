@@ -1,10 +1,125 @@
 # Orchestrator
 
-The orchestrator is the central coordinator inside the dispatch console process. It never appears as a visible pane -- it runs on the main TUI thread (`main.rs`), receiving events from multiple sources and making all dispatch, planning, completion, and merge decisions.
+The orchestrator is a persistent LLM that acts as the central decision-maker in the dispatch system. It receives voice transcripts from the radio, interprets them, and controls agents by issuing tool calls to the console runtime. It runs as a long-lived agent process inside the console, with its output monitored for tool calls and its input fed with tool results and incoming events.
+
+The console is a thin runtime that executes the orchestrator's tool calls and renders the TUI. See CONSOLE.md for the console's responsibilities.
 
 ## System Prompt
 
-The orchestrator itself does not use an LLM. It is deterministic Rust code. However, it spawns a **headless planner agent** when complex prompts arrive. The planner's system prompt:
+The orchestrator is initialized with the following system prompt. It establishes the LLM's role, available tools, and behavioral guidelines.
+
+```
+You are the Dispatch orchestrator -- a persistent coordinator for a voice-driven
+multi-agent coding system. You receive voice transcripts from a push-to-talk radio
+and manage AI coding agents working in isolated git worktrees.
+
+Your job is to interpret what the user wants and take action using your tools.
+You are the only decision-maker. The console executes your tool calls and reports
+results back to you.
+
+## What you control
+
+- Dispatching agents into repositories to work on tasks.
+- Planning complex tasks by decomposing them into subtasks.
+- Terminating agents that are stuck, misbehaving, or no longer needed.
+- Merging completed task branches back into main.
+- Sending follow-up messages to running agents.
+
+## How you receive input
+
+Voice transcripts arrive as messages prefixed with [MIC]. These are raw speech-to-text
+output that has already been through a command parser on the radio. If the parser
+detected a command (dispatch, terminate, switch target), the console handles it
+directly -- you only receive prompts that require interpretation and action.
+
+Completion events arrive as messages prefixed with [DONE]. These tell you an agent
+has finished its task and is idle. You should decide whether to merge the work and
+dispatch the next task.
+
+## Decision guidelines
+
+- For simple, single-task prompts: use `dispatch` directly.
+- For complex prompts that need multiple agents: use `plan` to decompose first.
+- When an agent completes: use `merge` to integrate the work, then check if
+  dependent tasks are now unblocked.
+- If an agent seems stuck or the user asks to kill it: use `terminate`.
+- Use `list_agents` to check current state before making dispatch decisions.
+- Use `message_agent` to provide follow-up instructions or answer agent questions.
+
+## Response format
+
+Think briefly about what action to take, then issue a tool call. Keep your reasoning
+concise. Do not ask the user for clarification -- interpret the voice transcript as
+best you can and act on it.
+```
+
+## Available Tools
+
+The orchestrator controls the dispatch system through seven tools. Tool calls are written as tagged JSON; the console intercepts them, executes the action, and returns a structured result.
+
+### Tool call format
+
+```json
+<tool_call>{"name": "dispatch", "input": {"repo": "myrepo", "prompt": "fix the auth bug"}}</tool_call>
+```
+
+### Tool result format
+
+```json
+<tool_result>
+{"type": "dispatched", "slot": 1, "callsign": "Alpha", "task_id": "t1"}
+</tool_result>
+```
+
+### Tools
+
+**dispatch** -- Create a task, set up a git worktree, and dispatch an agent.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `repo` | string | Repository name or path to work in. |
+| `prompt` | string | Task description / prompt for the agent. |
+
+Returns: `{ "type": "dispatched", "slot": N, "callsign": "...", "task_id": "..." }`
+
+**terminate** -- Kill a running agent by callsign or slot number. The slot is freed and the task is reopened for reassignment.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `agent` | string | Callsign (e.g. "Alpha") or slot number (e.g. "1"). |
+
+Returns: `{ "type": "terminated", "slot": N, "callsign": "..." }`
+
+**merge** -- Merge a completed task's worktree branch into main. On success, the worktree and branch are cleaned up. On conflict, the merge is aborted and the worktree is preserved.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `task_id` | string | Task ID to merge (e.g. "t1"). |
+
+Returns: `{ "type": "merged", "task_id": "...", "success": bool, "message": "..." }`
+
+**list_agents** -- Query all agent slots. Returns slot number, callsign, tool, busy/idle/empty status, current task, and repository for each slot.
+
+No parameters.
+
+Returns: `{ "type": "agents", "agents": [...] }`
+
+**list_repos** -- List available repositories that agents can be dispatched into.
+
+No parameters.
+
+Returns: `{ "type": "repos", "repos": [{ "name": "...", "path": "..." }, ...] }`
+
+**plan** -- Spawn a headless planner agent to decompose a complex prompt into subtasks. The planner writes a structured task breakdown to `.dispatch/tasks.md`. When planning completes, the orchestrator is notified and should dispatch agents for unblocked tasks.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `repo` | string | Repository name or path. |
+| `prompt` | string | Complex task description to decompose. |
+
+Returns: `{ "type": "plan_started", "prompt": "..." }`
+
+The planner is a separate headless agent (no pane, no slot consumed) with its own system prompt:
 
 ```
 You are the Dispatch task planner. Decompose the following task into a structured plan.
@@ -30,129 +145,123 @@ Rules:
 Task to plan:
 ```
 
-The planner runs as a background process (`tool_cmd -p "<prompt>"`), produces a markdown task list on stdout, and exits. The orchestrator writes the output to `.dispatch/tasks.md` and begins dispatching.
+**message_agent** -- Send text to a running agent's terminal (PTY). Use for follow-up instructions, clarifications, or answering agent questions.
 
-## Available Tools
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `agent` | string | Callsign (e.g. "Alpha") or slot number (e.g. "1"). |
+| `text` | string | Text to send to the agent's terminal. |
 
-The orchestrator operates through these internal functions:
+Returns: `{ "type": "message_sent", "agent": "...", "slot": N }`
 
-| Function | Purpose |
-|---|---|
-| `dispatch_slot()` | Creates a PTY process and launches an agent tool in a slot |
-| `dispatch_plan_tasks()` | Finds unblocked tasks and dispatches them to idle/empty slots |
-| `spawn_planner()` | Spawns the headless planner in a background thread |
-| `create_worktree()` | Creates a git worktree at `.dispatch/.worktrees/{task_id}` on branch `task/{task_id}` |
-| `merge_worktree()` | Merges `task/{task_id}` into main with `--no-ff`; on conflict, aborts and preserves the worktree |
-| `create_task_in_file()` | Appends a new task entry to `.dispatch/tasks.md` |
-| `update_task_in_file()` | Updates a task's status marker and agent annotation in `.dispatch/tasks.md` |
-| `fetch_ready_tasks()` | Parses `.dispatch/tasks.md` and returns tasks with status `[ ]` and no unresolved dependencies |
-| `is_idle_prompt()` | Checks the vt100 virtual screen for tool-specific idle patterns (e.g. `>` or `> ` for claude-code) |
-| `compute_screen_hash()` | Hashes all screen content to detect output changes without storing the full buffer |
+All tools return `{ "type": "error", "message": "..." }` on failure.
 
 ## Receiving Voice Transcripts
 
-Voice transcripts flow through this path:
+Voice transcripts flow through this path before reaching the orchestrator:
 
 ```
 Android radio
   -> SpeechRecognizer (on-device STT)
+  -> Post-processing correction table (code vocabulary normalization)
   -> Command parser (keyword matcher, not LLM)
   -> WebSocket message (JSON, PSK-authenticated)
-  -> Console WebSocket server (ws_server.rs, tokio async thread)
-  -> handle_message() routes by msg_type
-  -> mpsc channel sends WsEvent to main TUI thread
-  -> Orchestrator processes event in main loop
+  -> Console WebSocket server (tokio async thread)
+  -> Console forwards to orchestrator
 ```
 
-### Inbound message types
+The radio's command parser handles structured commands (dispatch, terminate, set_target) before they reach the orchestrator. What the orchestrator receives are prompts that need interpretation:
 
-| `type` | Purpose | Key fields |
+| Input type | Format | Example |
 |---|---|---|
-| `send` | Prompt to an agent (addressed or unaddressed) | `slot`, `text`, `auto` |
-| `dispatch` | Launch a new agent | `slot`, `tool` |
-| `terminate` | Kill an agent | `slot` |
-| `set_target` | Change default recipient for unaddressed prompts | `slot` |
-| `rename` | Change an agent's callsign | `slot`, `callsign` |
-| `list_agents` | Query all slot states | -- |
-| `radio_status` | Heartbeat with radio state | `state` |
-
-### WsEvent channel
-
-The WebSocket handler translates `send` messages with `auto: true` into one of three events for the main thread:
-
-| Event | Trigger | Effect |
-|---|---|---|
-| `AutoDispatch { slot, prompt }` | Short prompt (<=15 words), idle or empty slot available | Spawn PTY if needed, create task, write prompt to agent |
-| `QueueTask { prompt }` | All 26 slots busy | Create open task in `.dispatch/tasks.md`; dispatched when a slot frees |
-| `PlanRequest { prompt }` | Long prompt (>15 words) | Spawn headless planner to decompose into subtasks |
+| Voice prompt | `[MIC] <transcript>` | `[MIC] refactor the auth system to use JWT` |
+| Task completion | `[DONE] <callsign> <task_id>` | `[DONE] Alpha t1` |
+| Plan complete | `[PLAN] <task_count> tasks` | `[PLAN] 5 tasks` |
+| Plan failed | `[PLAN] failed` | `[PLAN] failed` |
+| Merge conflict | `[CONFLICT] <task_id>` | `[CONFLICT] t1.3` |
 
 ## Decision-Making
 
 ### Dispatch
 
-The orchestrator decides how to route each prompt:
+When a voice prompt arrives, the orchestrator decides how to handle it:
 
 ```
-Unaddressed prompt arrives (auto: true)
+[MIC] prompt arrives
   |
-  +-- >15 words? --> PlanRequest (spawn headless planner)
+  +-- Complex task (multi-step, broad scope)?
+  |     -> call `plan` to decompose into subtasks
   |
-  +-- <=15 words:
-       +-- Idle agent available? --> Send to idle agent
-       +-- Empty slot available? --> Launch new agent, send prompt
-       +-- All slots busy? --> QueueTask (create open task, dispatch later)
+  +-- Simple task (single agent can handle)?
+  |     -> call `dispatch` to assign directly
+  |
+  +-- Follow-up for a running agent?
+        -> call `message_agent` to relay instructions
 ```
 
-For addressed prompts (`slot` field set), the text goes directly to that agent's PTY.
+The orchestrator uses its judgment to classify prompts. There is no hard word-count threshold -- the LLM decides whether a task needs planning based on its complexity.
 
 ### Plan
 
-When a `PlanRequest` arrives:
+When the orchestrator calls `plan`:
 
-1. If no planner is running, `spawn_planner()` launches the configured tool (e.g. `claude -p`) in a background thread with the planner system prompt + user prompt.
-2. If a planner is already running, the prompt is queued as a direct task instead.
-3. The main loop polls `planner.receiver.try_recv()` each frame.
-4. On planner completion:
-   - Success: write plan to `.dispatch/tasks.md`, parse it, call `dispatch_plan_tasks()`.
-   - Failure: fall back to direct single-task dispatch.
+1. The console spawns a headless planner agent (no pane, no slot).
+2. The planner writes a task breakdown to `.dispatch/tasks.md` and exits.
+3. The console notifies the orchestrator: `[PLAN] N tasks`.
+4. The orchestrator should then call `list_agents` to see available slots and `dispatch` agents for unblocked tasks.
+
+If planning fails, the orchestrator receives `[PLAN] failed` and should fall back to dispatching the original prompt as a single task.
 
 ### Terminate
 
-Triggered by a `terminate` WebSocket message or the `x` key in command mode:
+The orchestrator terminates agents when:
 
-1. Kill the PTY child process.
-2. Clear the slot (but preserve the worktree and branch for reassignment).
-3. Revert the task status back to `[ ]` in `.dispatch/tasks.md`.
+- The user explicitly asks ("kill Alpha", "shut down Bravo").
+- An agent appears stuck (repeatedly completing with no meaningful changes).
+- A task needs to be reassigned to a different agent or repo.
+
+After termination, the task is reopened and the worktree is preserved. The orchestrator can dispatch a new agent to pick up where the previous one left off.
 
 ### Merge
 
-Triggered automatically when task completion is detected:
+When the orchestrator receives `[DONE] <callsign> <task_id>`:
 
-1. Run `git merge task/{task_id} --no-ff -m "merge task/{task_id}"` in the repo root.
-2. On success: remove worktree (`git worktree remove --force`), delete branch (`git branch -d`), mark task `[x]`.
-3. On conflict: abort merge (`git merge --abort`), add task ID to `conflict_tasks`, push ticker message. The worktree is preserved for manual resolution.
-4. After any completion, call `dispatch_plan_tasks()` to dispatch newly unblocked tasks.
+1. Call `merge` with the task ID.
+2. If the merge succeeds: check if any dependent tasks are now unblocked and dispatch them.
+3. If the merge has a conflict: the orchestrator is notified via `[CONFLICT] <task_id>`. The worktree is preserved for manual resolution. The orchestrator should not retry the merge -- it should continue dispatching independent tasks and flag the conflict.
 
 ## State Awareness
 
-### Agent slots
+The orchestrator maintains awareness of the system through its tools and the event stream from the console.
 
-The orchestrator tracks up to 26 agent slots in `App.slots: [Option<SlotState>; 26]`. Each `SlotState` contains:
+### Repos
 
-- `callsign` -- NATO phonetic name (or custom rename)
-- `tool` -- agent tool name (e.g. "claude-code")
-- `task_id` -- current task assignment
-- `worktree_path` -- absolute path to the task's git worktree
-- `writer` -- PTY file descriptor for sending input
-- `screen` -- `Arc<Mutex<vt100::Parser>>` for reading terminal output
-- `last_screen_hash` -- hash of last observed screen content
-- `last_output_at` -- timestamp of last screen change
-- `idle_since` -- timestamp when idle prompt was first detected (for debounce)
-- `child_exited` -- atomic flag set by the PTY reader thread when the process exits
+Call `list_repos` to discover available repositories. In single-repo mode, there is one repo. In multi-repo mode (console launched from a non-git parent directory), multiple repos are available and the orchestrator must specify which repo when dispatching.
 
-### Task tracking
+### Running agents
 
-Tasks are tracked in `.dispatch/tasks.md` with markdown checklist syntax:
+Call `list_agents` to get the current state of all slots. Each entry includes:
+
+- `slot` -- slot number (1-26)
+- `callsign` -- NATO phonetic name or custom name
+- `tool` -- agent tool (e.g. "claude-code")
+- `status` -- "busy", "idle", or "empty"
+- `task` -- current task ID, or null
+- `repo` -- repository the agent is working in
+
+The orchestrator should call `list_agents` before making dispatch decisions to avoid assigning tasks to busy agents or dispatching when all slots are full.
+
+### Task status
+
+Tasks are tracked in `.dispatch/tasks.md` at the target repo root. The orchestrator does not read this file directly -- it learns about task state through events and tool results:
+
+- `[DONE]` events indicate task completion.
+- `[PLAN]` events indicate plan creation.
+- `[CONFLICT]` events indicate merge failures.
+- `dispatch` results confirm task creation and assignment.
+- `merge` results confirm successful integration.
+
+Task format in `.dispatch/tasks.md`:
 
 ```
 - [ ] t1: Task description                    # open
@@ -161,75 +270,66 @@ Tasks are tracked in `.dispatch/tasks.md` with markdown checklist syntax:
 - [ ] t4: Blocked task -> t1, t2               # blocked by dependencies
 ```
 
-The orchestrator is the sole writer. A background thread polls the file every 5 seconds via `fetch_ready_tasks()` and sends results to the main loop over an mpsc channel.
-
-### Other state
-
-- `queued_tasks: Vec<QueuedTask>` -- tasks waiting for an available agent slot
-- `planner: Option<PlannerState>` -- current headless planner execution (prompt + receiver)
-- `conflict_tasks: Vec<String>` -- task IDs with unresolved merge conflicts
-- `repo_root: String` -- absolute path to the target repository
-- `tools: HashMap<String, String>` -- tool name to command mapping from config
-
 ## Communication with the Console Runtime
 
-The orchestrator **is** the console runtime. It runs as the main TUI thread in a single-threaded event loop. It coordinates with other threads through channels:
+The orchestrator runs as a persistent agent process inside the console. Communication is bidirectional through the agent's PTY:
 
-### Inbound channels
+### Orchestrator -> Console (tool calls)
 
-| Source | Channel | Events |
-|---|---|---|
-| WebSocket server (tokio async thread) | `ws_event_rx` | `AutoDispatch`, `QueueTask`, `PlanRequest` |
-| Task polling thread (5s interval) | `tasks_rx` | `Vec<QueuedTask>` of ready tasks from `.dispatch/tasks.md` |
-| Planner thread (one-shot) | `planner.receiver` | `Option<String>` plan text on planner exit |
-| PTY reader threads (per-slot) | `Arc<Mutex<vt100::Parser>>` | Screen content updated in shared mutex |
-| PTY reader threads (per-slot) | `child_exited: AtomicBool` | Set when the agent process exits |
-| Terminal | crossterm event poll | Keyboard input |
+The orchestrator writes tool calls to its stdout. The console monitors the orchestrator's PTY output, parses tool calls from `<tool_call>` tags (or bare JSON with a `"name"` field), executes them, and writes results back.
 
-### Outbound actions
+```
+Orchestrator PTY output:
+  I'll dispatch an agent to handle this.
+  <tool_call>{"name": "dispatch", "input": {"repo": "myapp", "prompt": "fix the login bug"}}</tool_call>
 
-| Target | Mechanism | Actions |
-|---|---|---|
-| Agent PTYs | `slot.writer` (PTY fd) | Write task prompts, forward keyboard input |
-| `.dispatch/tasks.md` | Direct filesystem I/O | Create/update/complete tasks |
-| Git | `Command::new("git")` | Create worktrees, merge branches, clean up |
-| Ticker | `app.push_ticker()` | Status messages rendered as scrolling marquee |
-| WebSocket clients | `OutboundMsg` responses | Slot status, ack, error messages |
+Console intercepts, executes, writes back:
+  <tool_result>
+  {"type": "dispatched", "slot": 1, "callsign": "Alpha", "task_id": "t1"}
+  </tool_result>
+```
+
+### Console -> Orchestrator (events)
+
+The console writes events to the orchestrator's PTY input:
+
+- `[MIC] <transcript>` -- voice transcript from the radio.
+- `[DONE] <callsign> <task_id>` -- agent completed its task.
+- `[PLAN] <count> tasks` or `[PLAN] failed` -- planner finished.
+- `[CONFLICT] <task_id>` -- merge conflict detected.
+
+### Lifecycle
+
+The orchestrator is launched when the console starts and runs for the entire session. It is not terminated between tasks -- it maintains context across all voice commands and agent completions within a session. Its PTY is not displayed in a pane; it runs headlessly like the planner, but persists rather than exiting after one task.
 
 ### Event loop
 
-Each frame of the main loop:
+From the orchestrator's perspective, the interaction is a continuous conversation:
 
-1. Check for exited child processes -- merge worktree if task was assigned.
-2. Scan slots for task completion (idle prompt with 500ms debounce, or inactivity timeout).
-3. For completed tasks: mark `[x]`, dispatch newly unblocked plan tasks, assign next queued task to freed slot.
-4. Poll task file changes from background thread.
-5. Check headless planner completion.
-6. Advance ticker animation.
-7. Process `WsEvent`s from WebSocket thread.
-8. Render TUI frame.
-9. Poll keyboard input and handle mode-specific key bindings.
+```
+1. Console writes event to orchestrator PTY (e.g. [MIC] transcript)
+2. Orchestrator reasons about what to do
+3. Orchestrator writes tool call(s)
+4. Console executes, writes tool result back
+5. Orchestrator processes result, may issue more tool calls
+6. Wait for next event
+```
 
-## Completion Detection
-
-Two-layer strategy ensures agents are detected as done regardless of tool behavior:
-
-**Layer 1: Idle prompt detection (primary).** Each frame, the orchestrator checks the last non-blank row of the vt100 virtual screen. For claude-code, the idle pattern is `>` or `> `. When first detected, `idle_since` is set. After 500ms of continuous idle, the task is marked complete.
-
-**Layer 2: Inactivity timeout (safety net).** If `completion_timeout_secs` is non-zero (default 60) and no screen content has changed for that duration, the task is marked complete. This catches tools that don't have a recognizable idle prompt.
+The orchestrator can issue multiple tool calls in sequence (e.g. `list_agents` followed by `dispatch`) within a single turn. It can also issue tool calls proactively when it receives completion events, without waiting for a voice prompt.
 
 ## Configuration
 
-Relevant keys in `config.toml`:
+The orchestrator's behavior is influenced by console configuration in `config.toml`:
 
 ```toml
-[beads]
-auto_track = true                    # Create tasks for voice prompts
-auto_dispatch = true                 # Auto-dispatch unaddressed prompts
-default_tool = "claude-code"         # Tool for auto-dispatch and planner
-completion_timeout_secs = 60         # Inactivity timeout (0 to disable)
+[tasks]
+default_tool = "claude-code"         # Tool for dispatched agents
+completion_timeout_secs = 60         # Inactivity timeout before marking agents idle
+auto_merge = true                    # Whether to auto-merge on completion
 
 [tools]
-claude-code = "claude"               # Shell command to launch each tool
+claude-code = "claude"               # Shell command for each tool
 copilot = "gh copilot suggest"
 ```
+
+Tool definitions are available as a JSON schema array (compatible with Claude/OpenAI function-calling format) via `tool_definitions()` in `console/src/tools.rs`.
