@@ -43,7 +43,7 @@ class VolumeUpHandler(
     }
 
     /** Call from Activity.onKeyDown for KEYCODE_VOLUME_UP. Returns true to consume. */
-    fun onKeyDown(agents: List<Agent>, currentSlot: Int): Boolean {
+    fun onKeyDown(@Suppress("UNUSED_PARAMETER") agents: List<Agent>, @Suppress("UNUSED_PARAMETER") currentSlot: Int): Boolean {
         longPressTriggered = false
         handler.postDelayed(longPressRunnable, LONG_PRESS_MS)
         return true

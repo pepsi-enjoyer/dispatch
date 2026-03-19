@@ -58,7 +58,7 @@ class QrScanActivity : AppCompatActivity() {
             val cameraProvider = cameraProviderFuture.get()
 
             val preview = Preview.Builder().build().also {
-                it.surfaceProvider = findViewById<PreviewView>(R.id.preview_view).surfaceProvider
+                it.setSurfaceProvider(findViewById<PreviewView>(R.id.preview_view).surfaceProvider)
             }
 
             val scanner = BarcodeScanning.getClient()

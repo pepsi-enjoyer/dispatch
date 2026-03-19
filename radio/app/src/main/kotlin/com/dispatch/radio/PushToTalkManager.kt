@@ -105,7 +105,7 @@ class PushToTalkManager(
                     onEmptyTranscript()
                 }
             } else {
-                onError(error)
+                this@PushToTalkManager.onError(error)
             }
             listening = false
         }

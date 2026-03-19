@@ -48,10 +48,12 @@ class ConsoleDiscovery(context: Context) {
         override fun onDiscoveryStarted(serviceType: String) {}
 
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+            @Suppress("DEPRECATION")
             nsdManager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
                 override fun onResolveFailed(si: NsdServiceInfo, errorCode: Int) {}
 
                 override fun onServiceResolved(si: NsdServiceInfo) {
+                    @Suppress("DEPRECATION")
                     val host = si.host?.hostAddress ?: return
                     val console = Console(host, si.port, si.serviceName)
                     mainHandler.post { listener?.onConsoleFound(console) }

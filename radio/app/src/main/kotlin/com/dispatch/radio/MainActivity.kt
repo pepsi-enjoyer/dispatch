@@ -1,6 +1,8 @@
 package com.dispatch.radio
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
@@ -8,6 +10,8 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.dispatch.radio.model.Agent
 import com.dispatch.radio.ui.AudioLevelView
 import com.google.gson.Gson
@@ -29,7 +33,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var volumeUpHandler: VolumeUpHandler
     private lateinit var pttManager: PushToTalkManager
     private var continuousManager: ContinuousListenManager? = null
-    private lateinit var wsClient: RadioWebSocketClient
+    private var wsClient: RadioWebSocketClient? = null
 
     // App state synced from console
     private var agents: List<Agent> = emptyList()
@@ -66,16 +70,22 @@ class MainActivity : AppCompatActivity() {
         bindViews()
         applyScreenOnFlag()
 
+        // Request microphone permission for speech recognition
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 100)
+        }
+
         volumeUpHandler = VolumeUpHandler(
             context = this,
             haptics = haptics,
             onCycleTarget = { agent ->
                 currentSlot = agent.slot
                 refreshTarget()
-                wsClient.send("""{"type":"set_target","slot":${agent.slot}}""")
+                wsClient?.send("""{"type":"set_target","slot":${agent.slot}}""")
             },
             onQuickDispatch = { tool ->
-                wsClient.send("""{"type":"dispatch","tool":"$tool"}""")
+                wsClient?.send("""{"type":"dispatch","tool":"$tool"}""")
             }
         )
 
@@ -84,7 +94,7 @@ class MainActivity : AppCompatActivity() {
             locale = settings.speechLocale,
             onListeningStart = {
                 haptics.listeningStart()
-                wsClient.send("""{"type":"radio_status","state":"listening"}""")
+                wsClient?.send("""{"type":"radio_status","state":"listening"}""")
                 tvListeningLabel.text = "LISTENING"
                 flListening.visibility = View.VISIBLE
                 tvPartial.text = ""
@@ -97,17 +107,17 @@ class MainActivity : AppCompatActivity() {
                 flListening.visibility = View.INVISIBLE
                 audioLevelView.level = 0f
                 haptics.sendConfirm()
-                wsClient.send("""{"type":"radio_status","state":"idle"}""")
+                wsClient?.send("""{"type":"radio_status","state":"idle"}""")
                 handleTranscript(transcript)
             },
             onEmptyTranscript = {
                 flListening.visibility = View.INVISIBLE
                 haptics.emptyTranscript()
-                wsClient.send("""{"type":"radio_status","state":"idle"}""")
+                wsClient?.send("""{"type":"radio_status","state":"idle"}""")
             },
             onError = {
                 flListening.visibility = View.INVISIBLE
-                wsClient.send("""{"type":"radio_status","state":"idle"}""")
+                wsClient?.send("""{"type":"radio_status","state":"idle"}""")
             }
         )
 
@@ -115,6 +125,7 @@ class MainActivity : AppCompatActivity() {
         initWebSocket()
 
         findViewById<android.widget.Button>(R.id.btn_settings).setOnClickListener {
+            @Suppress("DEPRECATION")
             startActivityForResult(Intent(this, SettingsActivity::class.java), SETTINGS_REQUEST)
         }
 
@@ -135,7 +146,7 @@ class MainActivity : AppCompatActivity() {
             context = this,
             locale = settings.speechLocale,
             onListeningStart = {
-                wsClient.send("""{"type":"radio_status","state":"listening"}""")
+                wsClient?.send("""{"type":"radio_status","state":"listening"}""")
                 tvListeningLabel.text = "CONTINUOUS"
                 flListening.visibility = View.VISIBLE
                 tvPartial.text = ""
@@ -184,19 +195,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initWebSocket() {
-        haptics.setEnabled(settings.hapticEnabled)
-        wsClient = RadioWebSocketClient(
-            host = settings.consoleHost,
-            port = settings.consolePort,
-            psk = settings.psk,
-            listener = object : RadioWebSocketClient.Listener {
-                override fun onConnected() = setConnected(true)
-                override fun onDisconnected() = setConnected(false)
-                override fun onMessage(text: String) = handleMessage(text)
-            },
-            certFingerprint = settings.certFingerprint,
-        )
-        wsClient.connect()
+        haptics.enabled = settings.hapticEnabled
+        try {
+            wsClient = RadioWebSocketClient(
+                host = settings.consoleHost,
+                port = settings.consolePort,
+                psk = settings.psk,
+                listener = object : RadioWebSocketClient.Listener {
+                    override fun onConnected() = setConnected(true)
+                    override fun onDisconnected() = setConnected(false)
+                    override fun onMessage(text: String) = handleMessage(text)
+                },
+                certFingerprint = settings.certFingerprint,
+            )
+            wsClient?.connect()
+        } catch (_: Exception) {
+            wsClient = null
+        }
     }
 
     override fun onResume() {
@@ -207,6 +222,17 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         VolumeKeyBridge.isActivityInForeground = false
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            return when (event.action) {
+                KeyEvent.ACTION_DOWN -> onKeyDown(event.keyCode, event)
+                KeyEvent.ACTION_UP -> onKeyUp(event.keyCode, event)
+                else -> true
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
@@ -246,7 +272,7 @@ class MainActivity : AppCompatActivity() {
             haptics.sendConfirm()
             flListening.visibility = View.INVISIBLE
             audioLevelView.level = 0f
-            wsClient.send("""{"type":"radio_status","state":"idle"}""")
+            wsClient?.send("""{"type":"radio_status","state":"idle"}""")
         } else {
             haptics.listeningStart()
             manager.start()
@@ -258,7 +284,7 @@ class MainActivity : AppCompatActivity() {
     private fun handleTranscript(transcript: String) {
         showLastDispatch("\"$transcript\"", null)
         val msg = """{"type":"send","text":${gson.toJson(transcript)},"auto":true}"""
-        wsClient.send(msg)
+        wsClient?.send(msg)
     }
 
     private fun handleMessage(text: String) {
@@ -268,17 +294,17 @@ class MainActivity : AppCompatActivity() {
                 val slots = json.getAsJsonArray("slots") ?: return
                 agents = slots.mapNotNull { el ->
                     val obj = el.asJsonObject
-                    val status = obj.get("status")?.asString ?: return@mapNotNull null
+                    val status = obj.get("status")?.takeUnless { it.isJsonNull }?.asString ?: return@mapNotNull null
                     Agent(
-                        slot = obj.get("slot")?.asInt ?: return@mapNotNull null,
-                        callsign = obj.get("callsign")?.asString ?: return@mapNotNull null,
-                        tool = obj.get("tool")?.asString ?: "",
+                        slot = obj.get("slot")?.takeUnless { it.isJsonNull }?.asInt ?: return@mapNotNull null,
+                        callsign = obj.get("callsign")?.takeUnless { it.isJsonNull }?.asString ?: return@mapNotNull null,
+                        tool = obj.get("tool")?.takeUnless { it.isJsonNull }?.asString ?: "",
                         status = status,
-                        task = obj.get("task")?.let { if (it.isJsonNull) null else it.asString }
+                        task = obj.get("task")?.takeUnless { it.isJsonNull }?.asString
                     )
                 }
-                currentSlot = json.get("target")?.asInt ?: currentSlot
-                queuedTasks = json.get("queued_tasks")?.asInt ?: 0
+                currentSlot = json.get("target")?.takeUnless { it.isJsonNull }?.asInt ?: currentSlot
+                queuedTasks = json.get("queued_tasks")?.takeUnless { it.isJsonNull }?.asInt ?: 0
                 refreshAgentList()
                 refreshTarget()
                 tvQueued.text = queuedTasks.toString()
@@ -327,7 +353,7 @@ class MainActivity : AppCompatActivity() {
                 val initial = greekInitial(agent.callsign)
                 text = initial
                 textSize = 18f
-                fontFamily = "monospace"
+                typeface = android.graphics.Typeface.MONOSPACE
                 setPadding(8, 8, 8, 8)
                 setTextColor(
                     if (agent.slot == currentSlot) getColor(R.color.cyan)
@@ -358,42 +384,48 @@ class MainActivity : AppCompatActivity() {
         else -> callsign.take(1).uppercase()
     }
 
+    @Suppress("DEPRECATION")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == SETTINGS_REQUEST && resultCode == RESULT_OK) {
-            // Reconnect with new settings
-            wsClient.disconnect()
-            pttManager.destroy()
-            continuousManager?.destroy()
-            initWebSocket()
-            pttManager = PushToTalkManager(
-                context = this,
-                locale = settings.speechLocale,
-                onListeningStart = {
-                    haptics.listeningStart()
-                    wsClient.send("""{"type":"radio_status","state":"listening"}""")
-                    tvListeningLabel.text = "LISTENING"
-                    flListening.visibility = View.VISIBLE
-                    tvPartial.text = ""
-                },
-                onPartialResult = { partial -> tvPartial.text = partial },
-                onFinalResult = { transcript ->
-                    flListening.visibility = View.INVISIBLE
-                    haptics.sendConfirm()
-                    wsClient.send("""{"type":"radio_status","state":"idle"}""")
-                    handleTranscript(transcript)
-                },
-                onEmptyTranscript = {
-                    flListening.visibility = View.INVISIBLE
-                    haptics.emptyTranscript()
-                    wsClient.send("""{"type":"radio_status","state":"idle"}""")
-                },
-                onError = {
-                    flListening.visibility = View.INVISIBLE
-                    wsClient.send("""{"type":"radio_status","state":"idle"}""")
-                }
-            )
-            initContinuousManager()
+            // Reload settings and reconnect
+            settings = RadioSettings(this)
+            try {
+                wsClient?.disconnect()
+                pttManager.destroy()
+                continuousManager?.destroy()
+                initWebSocket()
+                pttManager = PushToTalkManager(
+                    context = this,
+                    locale = settings.speechLocale,
+                    onListeningStart = {
+                        haptics.listeningStart()
+                        wsClient?.send("""{"type":"radio_status","state":"listening"}""")
+                        tvListeningLabel.text = "LISTENING"
+                        flListening.visibility = View.VISIBLE
+                        tvPartial.text = ""
+                    },
+                    onPartialResult = { partial -> tvPartial.text = partial },
+                    onFinalResult = { transcript ->
+                        flListening.visibility = View.INVISIBLE
+                        haptics.sendConfirm()
+                        wsClient?.send("""{"type":"radio_status","state":"idle"}""")
+                        handleTranscript(transcript)
+                    },
+                    onEmptyTranscript = {
+                        flListening.visibility = View.INVISIBLE
+                        haptics.emptyTranscript()
+                        wsClient?.send("""{"type":"radio_status","state":"idle"}""")
+                    },
+                    onError = {
+                        flListening.visibility = View.INVISIBLE
+                        wsClient?.send("""{"type":"radio_status","state":"idle"}""")
+                    }
+                )
+                initContinuousManager()
+            } catch (_: Exception) {
+                // Settings changed but reconnect failed — app stays running
+            }
         }
     }
 
@@ -403,6 +435,6 @@ class MainActivity : AppCompatActivity() {
         VolumeKeyBridge.isActivityInForeground = false
         pttManager.destroy()
         continuousManager?.destroy()
-        wsClient.disconnect()
+        wsClient?.disconnect()
     }
 }

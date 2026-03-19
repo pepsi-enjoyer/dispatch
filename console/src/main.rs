@@ -58,7 +58,7 @@ use std::{
 
 use chrono::Local;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -139,6 +139,7 @@ struct OrchestratorEvent {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 enum OrchestratorEventKind {
     /// Voice transcript received from radio.
     VoiceTranscript { text: String },
@@ -199,6 +200,7 @@ enum Overlay {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum RadioState {
     Connected,
     Disconnected,
@@ -270,6 +272,7 @@ struct PromptEntry {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum PromptSource {
     Voice,
     Keyboard,
@@ -447,11 +450,7 @@ impl App {
     }
 
     fn psk_display(&self) -> String {
-        if self.psk_expanded || self.psk.len() <= 4 {
-            self.psk.clone()
-        } else {
-            format!("{}...", &self.psk[..4])
-        }
+        self.psk.clone()
     }
 
     /// True if `global_idx` is the last empty slot on the last page (dispatch-bgz.11).
@@ -472,13 +471,6 @@ impl App {
             }
         }
         true
-    }
-
-    fn ws_target_callsign(&self) -> Option<String> {
-        let st = self.ws_state.lock().ok()?;
-        let slot = st.target?;
-        let idx = (slot as usize).saturating_sub(1);
-        st.slots.get(idx)?.as_ref().map(|a| a.callsign.clone())
     }
 
     fn tool_cmd(&self, tool_key: &str) -> &str {
@@ -891,7 +883,7 @@ fn dispatch_slot(
 
     let child_pid = child.process_id();
 
-    let screen = Arc::new(Mutex::new(vt100::Parser::new(pane_rows, pane_cols, scrollback_lines as usize)));
+    let screen = Arc::new(Mutex::new(vt100::Parser::new(pane_rows, pane_cols, (scrollback_lines as usize).min(10_000))));
     let screen_w = Arc::clone(&screen);
     let child_exited = Arc::new(AtomicBool::new(false));
     let child_exited_w = Arc::clone(&child_exited);
@@ -1521,13 +1513,14 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
             orchestrator::OrchestratorState::Responding => "  ORCH: THINKING",
             orchestrator::OrchestratorState::Dead => "  ORCH: DEAD",
         },
-        _ => "  ORCH: OFF",
+        Some(_) => "  ORCH: DEAD",
+        None => "  ORCH: READY",
     };
     let right = format!(
-        "   PSK: {}   AGENTS: {}/{}{}{}  PAGE {}/{}  {}",
+        "PSK: {}  AGENTS: {}/{}{}{}  PAGE {}/{}  {}",
         app.psk_display(),
         app.active_count(),
-        app.slots.len(),
+        MAX_SLOTS,
         workspace_indicator,
         orch_indicator,
         app.current_page + 1,
@@ -1535,10 +1528,25 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         clock,
     );
 
+    // Build left and right portions, pad gap to right-align, and truncate to fit.
+    let left_text = " RADIO: ";
+    let radio_text = match app.radio_state {
+        RadioState::Connected => "● CONNECTED",
+        RadioState::Disconnected => "● DISCONNECTED",
+    };
+    let inner_width = area.width.saturating_sub(2) as usize; // minus border chars
+    let left_len = left_text.len() + radio_text.len();
+    // Truncate right side if it doesn't fit.
+    let max_right = inner_width.saturating_sub(left_len + 1);
+    let right_truncated: String = right.chars().take(max_right).collect();
+    let used = left_len + right_truncated.len();
+    let gap = if inner_width > used { inner_width - used } else { 1 };
+    let right_padded = format!("{}{}", " ".repeat(gap), right_truncated);
+
     let status_line = Line::from(vec![
-        Span::raw(" RADIO: "),
+        Span::raw(left_text),
         radio_span,
-        Span::styled(right, Style::default().fg(Color::White)),
+        Span::styled(right_padded, Style::default().fg(Color::White)),
     ]);
 
     let block = Block::default()
@@ -1952,33 +1960,21 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 
     let content = match app.mode {
         Mode::Command => {
-            let radio_label = match app.radio_state {
-                RadioState::Connected => "RADIO CONNECTED",
-                RadioState::Disconnected => "RADIO IDLE",
-            };
-            let ws_target_str = match app.ws_target_callsign() {
-                Some(cs) => format!(" │ WS→{} ", cs),
-                None => String::new(),
-            };
-            // dispatch-6nm: show different hints when orchestrator view is active.
-            let hints = if app.view_mode == ViewMode::Orchestrator {
-                "│ o agents │ Up/Down scroll │ PgUp/PgDn │ q quit │ ? help"
-            } else {
-                "│ i/Enter input │ 1-4 slot │ Tab cycle │ ]/[ page │ PgUp/Dn scroll │ n/N dispatch │ x term │ R rename │ t tasks │ h history │ o orch │ p psk │ q quit │ ? help"
-            };
             let view_indicator = match app.view_mode {
                 ViewMode::Agents => "",
-                ViewMode::Orchestrator => " ORCH │",
+                ViewMode::Orchestrator => "ORCH ",
+            };
+            let hints = if app.view_mode == ViewMode::Orchestrator {
+                " o:back  ?:help  q:quit"
+            } else {
+                " i:input  n:new  x:kill  t:tasks  o:orch  ?:help  q:quit"
             };
             Line::from(vec![
-                Span::styled(" ▸ ", Style::default().fg(Color::Cyan)),
-                Span::styled(view_indicator, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                Span::styled(radio_label, Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!(" │ TARGET: {} ", target_name),
-                    Style::default().fg(Color::White),
+                    format!(" {} ▸ {} ", view_indicator, target_name),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(ws_target_str, Style::default().fg(Color::Cyan)),
+                Span::styled("│", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     hints,
                     Style::default().fg(Color::DarkGray),
@@ -1987,11 +1983,12 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         }
         Mode::Input => Line::from(vec![
             Span::styled(
-                format!(" -- INPUT ({}) --", target_name),
+                format!(" INPUT [{}] ", target_name),
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             ),
+            Span::styled("│", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                "                              ESC exit │ ESC ESC send Esc to PTY",
+                " ESC:exit  ESC ESC:send Esc to PTY",
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -2090,6 +2087,7 @@ fn render_qr_overlay(f: &mut Frame, area: Rect, app: &App) {
 
     // Build lines using Unicode half-block characters.
     // Each terminal row encodes 2 QR rows. Each module is 2 chars wide for squareness.
+    // QR: dark modules on white background. Background set by bg colors.
     let dark = Color::Black;
     let light = Color::White;
 
@@ -2128,7 +2126,7 @@ fn render_qr_overlay(f: &mut Frame, area: Rect, app: &App) {
                 (false, true) => ('\u{2584}', light, dark),  // ▄
                 (false, false) => (' ', light, light),
             };
-            let s = format!("{ch}{ch}"); // 2 chars wide for square modules
+            let s = format!("{ch}"); // 1 char wide; half-blocks make it roughly square
             spans.push(Span::styled(s, Style::default().fg(fg).bg(bg)));
         }
         lines.push(Line::from(spans));
@@ -2146,7 +2144,7 @@ fn render_qr_overlay(f: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(Color::DarkGray),
     )));
 
-    let content_width = (total_w as u16 * 2) + 4; // 2 chars per module + border padding
+    let content_width = total_w as u16 + 4; // 1 char per module + border padding
     let content_height = lines.len() as u16 + 2; // +2 for border
     let r = centered_rect(content_width, content_height, area);
     f.render_widget(Clear, r);
@@ -2567,6 +2565,9 @@ fn render_rename_overlay(f: &mut Frame, area: Rect, app: &App) {
 
 /// Compute PTY dimensions from terminal size.
 fn compute_pane_size(term_rows: u16, term_cols: u16) -> (u16, u16) {
+    // Cap to sane values (guards against bogus size reports on some terminals).
+    let term_rows = term_rows.min(500);
+    let term_cols = term_cols.min(1000);
     // 3-row header + 1-row ticker + 1-row footer = 5 fixed rows; remaining split 2 ways vertically.
     // Each pane: 2 border rows + 4 info strip rows = 6 overhead.
     let pane_h = term_rows.saturating_sub(5) / 2;
@@ -2664,24 +2665,9 @@ fn main() -> io::Result<()> {
         tls_fingerprint,
     );
 
-    // dispatch-h62: spawn persistent LLM orchestrator on startup.
-    // The orchestrator replaces the deterministic command parser — voice
-    // transcripts are piped to it and it decides what to do via tool calls.
-    {
-        let repos: Vec<&str> = app.repo_list().iter().copied().collect();
-        let tool_defs = tools::tool_definitions();
-        let system_prompt = orchestrator::build_system_prompt(&repos, &tool_defs);
-        let orch_cwd = app.default_repo_root().to_string();
-        match orchestrator::spawn(&system_prompt, &orch_cwd) {
-            Some(orch) => {
-                app.orchestrator = Some(orch);
-                app.push_ticker("ORCHESTRATOR: LLM orchestrator online".to_string());
-            }
-            None => {
-                app.push_ticker("ORCHESTRATOR: failed to spawn — falling back to manual mode".to_string());
-            }
-        }
-    }
+    // dispatch-h62: orchestrator is spawned lazily on first voice transcript
+    // to avoid the heavy claude process consuming memory while idle.
+    app.push_ticker("ORCHESTRATOR: ready (will start on first voice input)".to_string());
 
     // dispatch-sa1: show multi-repo indicator if applicable.
     if app.is_multi_repo() {
@@ -2927,6 +2913,22 @@ fn main() -> io::Result<()> {
         while let Ok(event) = ws_event_rx.try_recv() {
             let ws_server::WsEvent::VoiceTranscript { text } = event;
             app.push_orch(OrchestratorEventKind::VoiceTranscript { text: text.clone() });
+            // Lazy-spawn orchestrator on first voice input.
+            if app.orchestrator.is_none() {
+                let repos: Vec<&str> = app.repo_list().iter().copied().collect();
+                let tool_defs = tools::tool_definitions();
+                let system_prompt = orchestrator::build_system_prompt(&repos, &tool_defs);
+                let orch_cwd = app.default_repo_root().to_string();
+                match orchestrator::spawn(&system_prompt, &orch_cwd) {
+                    Some(orch) => {
+                        app.orchestrator = Some(orch);
+                        app.push_ticker("ORCHESTRATOR: online".to_string());
+                    }
+                    None => {
+                        app.push_ticker("ORCHESTRATOR: failed to spawn".to_string());
+                    }
+                }
+            }
             if let Some(orch) = &mut app.orchestrator {
                 orch.send_message(&format!("[MIC] {}", text));
             }
@@ -2968,10 +2970,17 @@ fn main() -> io::Result<()> {
                             success,
                         });
 
-                        // Send tool result back to the orchestrator.
-                        let result_text = tools::format_tool_result(None, &result);
-                        if let Some(orch) = &mut app.orchestrator {
-                            orch.send_message(&result_text);
+                        // Only send query results back to the orchestrator.
+                        // Action tools (dispatch, plan, terminate, merge) are fire-and-forget
+                        // to prevent feedback loops that spawn unlimited processes.
+                        let is_query = matches!(call,
+                            tools::ToolCall::ListAgents | tools::ToolCall::ListRepos
+                        );
+                        if is_query {
+                            let result_text = tools::format_tool_result(None, &result);
+                            if let Some(orch) = &mut app.orchestrator {
+                                orch.send_message(&result_text);
+                            }
                         }
                     }
                 }
@@ -3042,7 +3051,7 @@ fn main() -> io::Result<()> {
                     );
                 }
 
-                Event::Key(key) => match app.mode {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match app.mode {
                     // Input mode: keystrokes forwarded to targeted PTY (dispatch-bgz.4)
                     Mode::Input => {
                         if key.code == KeyCode::Esc {

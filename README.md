@@ -62,8 +62,8 @@ sample-repo/
 
 ```sh
 cd console
-cargo build --release
-./target/release/dispatch
+cargo install --path .
+dispatch
 ```
 
 On first run, a config file is auto-generated with a random pre-shared key (PSK):

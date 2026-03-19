@@ -179,6 +179,10 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun saveSettings() {
+        // Stop discovery and cancel pending callbacks before saving
+        discovery.stopDiscovery()
+        etHost.removeCallbacks(null)
+
         settings.consoleHost = etHost.text.toString().trim().ifEmpty { "192.168.1.1" }
         settings.consolePort = etPort.text.toString().trim().toIntOrNull() ?: 9800
         settings.psk = etPsk.text.toString().trim()
@@ -187,13 +191,6 @@ class SettingsActivity : AppCompatActivity() {
         settings.confirmBeforeSend = cbConfirm.isChecked
         settings.keepScreenOn = cbScreenOn.isChecked
         settings.continuousListening = cbContinuous.isChecked
-
-        // Apply keep screen on immediately
-        if (settings.keepScreenOn) {
-            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        } else {
-            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
 
         setResult(RESULT_OK)
         finish()

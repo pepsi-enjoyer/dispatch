@@ -33,6 +33,8 @@ android {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
+    implementation(libs.material)
+    implementation(libs.gson)
     implementation(libs.okhttp)
     implementation(libs.camerax.core)
     implementation(libs.camerax.camera2)

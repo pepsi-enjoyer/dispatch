@@ -16,16 +16,12 @@ import android.os.VibratorManager
  *  - [targetChange]    : crisp tick (20 ms) — volume-up target cycle
  *  - [dispatchConfirm] : ascending triple-pulse — new agent dispatched
  *
- * Set [enabled] = false (or call [setEnabled]) to silence all patterns.
+ * Set [enabled] = false to silence all patterns.
  * Defaults to enabled; wire to [RadioSettings.hapticEnabled] on startup.
  */
 class HapticFeedback(context: Context) {
 
     var enabled: Boolean = true
-
-    fun setEnabled(enabled: Boolean) {
-        this.enabled = enabled
-    }
 
     private val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
