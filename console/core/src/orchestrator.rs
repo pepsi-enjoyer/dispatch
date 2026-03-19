@@ -2,12 +2,8 @@
 //
 // Spawns a headless `claude` process using stream-json I/O as the orchestrator.
 // Voice transcripts and system events are piped in as user messages. The
-// orchestrator responds with reasoning and <tool_call> tags, which the console
-// parses and executes. Tool results are sent back as the next user message.
-//
-// Wire protocol:
-//   stdin:  JSON lines — {"type":"user","content":"..."}
-//   stdout: JSON lines — init, assistant, result messages
+// orchestrator responds with reasoning and structured action JSON blocks,
+// which the console parses and executes.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -53,63 +49,72 @@ pub struct Orchestrator {
 
 // ── System prompt ────────────────────────────────────────────────────────────
 
-/// Build the orchestrator system prompt from dynamic state.
+/// Build the orchestrator system prompt. Reads from docs/ORCHESTRATOR.md if
+/// available, otherwise uses a minimal built-in prompt.
 pub fn build_system_prompt(
     repos: &[&str],
-    tool_defs: &serde_json::Value,
+    _tool_defs: &serde_json::Value,
 ) -> String {
-    let repo_list: Vec<String> = repos
-        .iter()
-        .map(|p| {
-            let name = std::path::Path::new(p)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(p);
-            format!("- {} ({})", name, p)
-        })
-        .collect();
-
-    let tools_json = serde_json::to_string_pretty(tool_defs).unwrap_or_default();
-
     let repo_name = repos.first()
         .and_then(|p| std::path::Path::new(p).file_name())
         .and_then(|n| n.to_str())
         .unwrap_or("repo");
 
+    // Try to read ORCHESTRATOR.md from the repo
+    let md_content = repos.first()
+        .and_then(|repo| {
+            let path = format!("{}/docs/ORCHESTRATOR.md", repo);
+            std::fs::read_to_string(&path).ok()
+        })
+        .unwrap_or_default();
+
+    let md_section = if md_content.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nReference documentation:\n{}", md_content)
+    };
+
     format!(
-        r#"You are a dispatch coordinator. You receive voice commands and act on them by calling tools.
+        r#"You are a dispatch coordinator. You receive voice commands prefixed with [MIC] and system events prefixed with [EVENT].
 
-You call tools by including <tool_call> tags in your response. Do NOT use Claude Code built-in tools. ONLY use the tools below via <tool_call> tags.
+You MUST respond with a JSON action block wrapped in ```action fences for EVERY request that needs an action. This is your ONLY way to execute commands. Plain text responses without action blocks do NOTHING.
 
-Repo: {repo_name}
+Format (you MUST use this exact format):
+```action
+{{"action": "dispatch", "repo": "{repo_name}", "prompt": "the task"}}
+```
 
-Tools:
-- dispatch(repo, prompt) — dispatch a new agent
-- terminate(agent) — kill an agent
-- merge(task_id) — merge a completed task
-- list_agents() — show agent status
-- plan(repo, prompt) — decompose complex task
-- message_agent(agent, text) — send text to existing agent
+Available actions:
+- dispatch: {{"action": "dispatch", "repo": "{repo_name}", "prompt": "task description"}}
+- terminate: {{"action": "terminate", "agent": "Alpha"}}
+- merge: {{"action": "merge", "task_id": "t1"}}
+- list_agents: {{"action": "list_agents"}}
+- plan: {{"action": "plan", "repo": "{repo_name}", "prompt": "complex task"}}
+- message_agent: {{"action": "message_agent", "agent": "Alpha", "text": "message"}}
 
-RULES — follow these exactly:
+RULES:
+1. "Alpha do you copy" or "dispatch Alpha" → IMMEDIATELY respond with:
+   Dispatching Alpha.
+   ```action
+   {{"action": "dispatch", "repo": "{repo_name}", "prompt": "Alpha do you copy"}}
+   ```
 
-1. When someone mentions an agent name ("Alpha do you copy", "dispatch Alpha", "Alpha fix the bug"):
-   ALWAYS dispatch immediately. Do NOT call list_agents first. Do NOT ask what task to give them.
-   Example: User says "Alpha do you copy" → you respond:
-   Dispatching Alpha.<tool_call>{{"name":"dispatch","input":{{"repo":"{repo_name}","prompt":"Alpha do you copy"}}}}</tool_call>
+2. Any task without a named agent → dispatch an agent for it immediately.
 
-2. When someone gives a task without naming an agent ("fix the login bug", "perform a security audit"):
-   Dispatch an agent for it immediately.
-   <tool_call>{{"name":"dispatch","input":{{"repo":"{repo_name}","prompt":"fix the login bug"}}}}</tool_call>
+3. "terminate Alpha" →
+   ```action
+   {{"action": "terminate", "agent": "Alpha"}}
+   ```
 
-3. "terminate Alpha" → <tool_call>{{"name":"terminate","input":{{"agent":"Alpha"}}}}</tool_call>
+4. [EVENT] TASK_COMPLETE task=X →
+   ```action
+   {{"action": "merge", "task_id": "X"}}
+   ```
 
-4. [EVENT] TASK_COMPLETE task=X → <tool_call>{{"name":"merge","input":{{"task_id":"X"}}}}</tool_call>
-
-5. NEVER ask clarifying questions. NEVER say "what should Alpha work on?". Just dispatch with the user's exact words as the prompt.
-
-6. NEVER call list_agents before dispatching. Just dispatch."#,
+5. NEVER ask clarifying questions. NEVER call list_agents before dispatching. Just act.
+6. ALWAYS include an ```action block when the user wants something done. Without it, nothing happens.{md_section}"#,
         repo_name = repo_name,
+        md_section = md_section,
     )
 }
 
@@ -294,15 +299,35 @@ impl Drop for Orchestrator {
     }
 }
 
-// ── Multi-tool-call parsing ──────────────────────────────────────────────────
+// ── Action block parsing ─────────────────────────────────────────────────────
 
-/// Parse all tool calls from a text block. Returns them in order of appearance.
+/// Parse action blocks from orchestrator response text.
+/// Looks for ```action ... ``` fenced blocks containing JSON.
 pub fn parse_all_tool_calls(text: &str) -> Vec<tools::ToolCall> {
     let mut calls = Vec::new();
     let mut search_from = 0;
 
     while search_from < text.len() {
         let remaining = &text[search_from..];
+
+        // Look for ```action blocks
+        let start_marker = "```action";
+        let end_marker = "```";
+
+        if let Some(start) = remaining.find(start_marker) {
+            let json_start = start + start_marker.len();
+            let after_marker = &remaining[json_start..];
+            if let Some(end) = after_marker.find(end_marker) {
+                let json_str = after_marker[..end].trim();
+                if let Ok(call) = parse_action_json(json_str) {
+                    calls.push(call);
+                }
+                search_from += json_start + end + end_marker.len();
+                continue;
+            }
+        }
+
+        // Also try <tool_call> format as fallback
         if let Some(start) = remaining.find("<tool_call>") {
             if let Some(end) = remaining[start..].find("</tool_call>") {
                 let json_start = start + "<tool_call>".len();
@@ -315,10 +340,49 @@ pub fn parse_all_tool_calls(text: &str) -> Vec<tools::ToolCall> {
                 continue;
             }
         }
+
         break;
     }
 
     calls
+}
+
+/// Parse a JSON action block into a ToolCall.
+fn parse_action_json(json_str: &str) -> Result<tools::ToolCall, serde_json::Error> {
+    let v: serde_json::Value = serde_json::from_str(json_str)?;
+    let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
+
+    match action {
+        "dispatch" => {
+            let repo = v.get("repo").and_then(|r| r.as_str()).unwrap_or("").to_string();
+            let prompt = v.get("prompt").and_then(|p| p.as_str()).unwrap_or("").to_string();
+            Ok(tools::ToolCall::Dispatch { repo, prompt })
+        }
+        "terminate" => {
+            let agent = v.get("agent").and_then(|a| a.as_str()).unwrap_or("").to_string();
+            Ok(tools::ToolCall::Terminate { agent })
+        }
+        "merge" => {
+            let task_id = v.get("task_id").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            Ok(tools::ToolCall::Merge { task_id })
+        }
+        "list_agents" => Ok(tools::ToolCall::ListAgents),
+        "list_repos" => Ok(tools::ToolCall::ListRepos),
+        "plan" => {
+            let repo = v.get("repo").and_then(|r| r.as_str()).unwrap_or("").to_string();
+            let prompt = v.get("prompt").and_then(|p| p.as_str()).unwrap_or("").to_string();
+            Ok(tools::ToolCall::Plan { repo, prompt })
+        }
+        "message_agent" => {
+            let agent = v.get("agent").and_then(|a| a.as_str()).unwrap_or("").to_string();
+            let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            Ok(tools::ToolCall::MessageAgent { agent, text })
+        }
+        _ => {
+            use serde::de::Error;
+            Err(serde_json::Error::custom(format!("unknown action: {}", action)))
+        }
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -328,19 +392,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_single_tool_call() {
-        let text = r#"I'll dispatch an agent. <tool_call>{"name": "dispatch", "input": {"repo": "myrepo", "prompt": "fix bug"}}</tool_call>"#;
+    fn parse_action_block() {
+        let text = "Dispatching Alpha.\n```action\n{\"action\": \"dispatch\", \"repo\": \"myrepo\", \"prompt\": \"fix bug\"}\n```";
         let calls = parse_all_tool_calls(text);
         assert_eq!(calls.len(), 1);
         assert!(matches!(calls[0], tools::ToolCall::Dispatch { .. }));
     }
 
     #[test]
-    fn parse_multiple_tool_calls() {
-        let text = r#"Let me check the state first.
-<tool_call>{"name": "list_agents"}</tool_call>
-Then dispatch.
-<tool_call>{"name": "dispatch", "input": {"repo": "myrepo", "prompt": "fix it"}}</tool_call>"#;
+    fn parse_multiple_action_blocks() {
+        let text = "Doing two things.\n```action\n{\"action\": \"list_agents\"}\n```\nThen dispatch.\n```action\n{\"action\": \"dispatch\", \"repo\": \"myrepo\", \"prompt\": \"fix it\"}\n```";
         let calls = parse_all_tool_calls(text);
         assert_eq!(calls.len(), 2);
         assert!(matches!(calls[0], tools::ToolCall::ListAgents));
@@ -348,19 +409,27 @@ Then dispatch.
     }
 
     #[test]
-    fn parse_no_tool_calls() {
-        let text = "Just some reasoning text with no tool calls.";
+    fn parse_tool_call_fallback() {
+        let text = r#"<tool_call>{"name": "dispatch", "input": {"repo": "myrepo", "prompt": "fix bug"}}</tool_call>"#;
+        let calls = parse_all_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0], tools::ToolCall::Dispatch { .. }));
+    }
+
+    #[test]
+    fn parse_no_actions() {
+        let text = "Just some reasoning text with no action blocks.";
         let calls = parse_all_tool_calls(text);
         assert!(calls.is_empty());
     }
 
     #[test]
-    fn system_prompt_includes_repos() {
+    fn system_prompt_includes_repo() {
         let repos = vec!["/home/user/myrepo"];
         let tools = tools::tool_definitions();
         let prompt = build_system_prompt(&repos, &tools);
         assert!(prompt.contains("myrepo"));
         assert!(prompt.contains("dispatch"));
-        assert!(prompt.contains("<tool_call>"));
+        assert!(prompt.contains("```action"));
     }
 }
