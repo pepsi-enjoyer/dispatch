@@ -47,6 +47,8 @@ pub struct Orchestrator {
     pub state: OrchestratorState,
     /// Queued messages to send once the current turn completes.
     pending: Vec<String>,
+    /// Session ID from the init message.
+    session_id: String,
 }
 
 // ── System prompt ────────────────────────────────────────────────────────────
@@ -138,10 +140,12 @@ pub fn spawn(system_prompt: &str, cwd: &str) -> Option<Orchestrator> {
     let stdout = child.stdout.take()?;
 
     let (tx, rx) = mpsc::channel();
+    let (sid_tx, sid_rx) = mpsc::channel();
 
     // Reader thread: parse stream-json output line by line.
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
+        let mut sent_sid = false;
         for line in reader.lines() {
             let line = match line {
                 Ok(l) => l,
@@ -157,6 +161,14 @@ pub fn spawn(system_prompt: &str, cwd: &str) -> Option<Orchestrator> {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+
+            // Capture session_id from the first message that has one.
+            if !sent_sid {
+                if let Some(sid) = parsed.get("session_id").and_then(|v| v.as_str()) {
+                    let _ = sid_tx.send(sid.to_string());
+                    sent_sid = true;
+                }
+            }
 
             let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -196,12 +208,17 @@ pub fn spawn(system_prompt: &str, cwd: &str) -> Option<Orchestrator> {
         let _ = tx.send(OrchestratorOutput::Exited);
     });
 
+    // Wait briefly for the init message to get the session_id.
+    let session_id = sid_rx.recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap_or_else(|_| "default".to_string());
+
     Some(Orchestrator {
         child,
         stdin,
         rx,
         state: OrchestratorState::Idle,
         pending: Vec::new(),
+        session_id,
     })
 }
 
@@ -224,11 +241,13 @@ impl Orchestrator {
     /// Send directly (bypasses queue check).
     fn send_raw(&mut self, content: &str) {
         let msg = serde_json::json!({
-            "type": "user_message",
+            "type": "user",
             "message": {
                 "role": "user",
                 "content": content
-            }
+            },
+            "session_id": self.session_id,
+            "parent_tool_use_id": null
         });
         let line = format!("{}\n", msg);
         if self.stdin.write_all(line.as_bytes()).is_err() || self.stdin.flush().is_err() {
