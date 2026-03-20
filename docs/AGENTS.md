@@ -72,7 +72,10 @@ Before finishing:
 2. **Merge into main and push.** Navigate back to the repo root, merge your branch, remove the worktree, delete the branch, and push to remote (see workflow above).
 3. **Return to the prompt.** The console's completion detector watches for an idle prompt pattern. Once it sees you are idle, it reports completion to the orchestrator. Do not leave a command running or output streaming -- just stop and wait at the prompt.
 
-If the merge fails due to conflicts, stop and return to the prompt. The console flags the conflict for manual review.
+If the merge fails due to conflicts, resolve them:
+1. Pull the latest main: `git pull origin main`
+2. Attempt the merge again. If conflicts remain, fix them manually, then `git add` the resolved files and `git commit`.
+3. Push to remote and clean up as normal.
 
 ## Rules
 
