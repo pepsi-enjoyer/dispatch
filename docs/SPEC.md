@@ -578,7 +578,7 @@ Pages are cycled with `[` / `]` or `Shift+Left` / `Shift+Right`. The header show
 │                                │                                    │
 │                                │                                    │
 ├────────────────────────────────┴────────────────────────────────────┤
-│ ▸ RADIO IDLE │ TARGET: ALPHA │ i input │ [] page │ n new │ ?      │
+│ ▸ RADIO IDLE │ TARGET: ALPHA │ ⏎ input │ [] page │ n new │ ?      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -614,7 +614,7 @@ Page 2 of the same session:
 │                                │                                    │
 │                                │                                    │
 ├────────────────────────────────┴────────────────────────────────────┤
-│ ▸ RADIO IDLE │ TARGET: ALPHA │ i input │ [] page │ n new │ ?      │
+│ ▸ RADIO IDLE │ TARGET: ALPHA │ ⏎ input │ [] page │ n new │ ?      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -667,7 +667,6 @@ Modal, vim-style. Two modes:
 | Transition       | Key         | Behavior                                           |
 |------------------|-------------|----------------------------------------------------|
 | Command -> Input | `Enter`     | Enter input mode on the currently targeted pane    |
-| Command -> Input | `i`         | Same as `Enter`                                    |
 | Input -> Command | `Escape`    | Return to command mode                             |
 
 While in input mode, `Escape` is the only key intercepted by the console. Everything else goes to the PTY. If the underlying tool uses `Escape`, press it twice.
@@ -678,7 +677,7 @@ While in input mode, `Escape` is the only key intercepted by the console. Everyt
 
 | Key               | Action                                                       |
 |-------------------|--------------------------------------------------------------|
-| `Enter` / `i`     | Enter input mode on targeted pane                            |
+| `Enter`           | Enter input mode on targeted pane                            |
 | `1-4`             | Select target slot on current page (slot = page offset + key)|
 | `Tab`             | Cycle target forward across all pages (skips empty slots, auto-navigates) |
 | `Shift+Tab`       | Cycle target backward across all pages                       |
