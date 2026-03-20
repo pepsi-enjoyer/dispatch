@@ -74,7 +74,7 @@ Every agent is assigned a callsign from the NATO phonetic alphabet by default, i
 
 Maximum 26 concurrent agents. Callsigns are bound to slots, not agent instances. If Alpha is terminated and a new agent is dispatched into slot 1, it becomes Alpha again.
 
-Agents can be renamed from the console via the `R` key. Custom names replace the NATO default until the agent is terminated, at which point the slot reverts.
+Agents can be renamed by the orchestrator. Custom names replace the NATO default until the agent is terminated, at which point the slot reverts.
 
 Callsigns are the primary identifier for voice commands. All agents are addressable by voice regardless of which page is currently displayed in the console.
 
@@ -177,12 +177,9 @@ Dispatch supports two workspace modes:
 
 In multi-repo mode:
 
-- Pressing `n` opens a repo selector overlay instead of dispatching immediately. The user picks which repo to target.
 - Each agent slot tracks its own `repo_root`. Task and worktree operations use the slot's repo, not a global root.
 - The task list overlay (`t`) aggregates tasks from all detected repos.
-- Pressing `S` rescans child directories for new or removed repos.
 - The header bar shows the repo count.
-- Auto-startup (dispatching Alpha on launch) is skipped; the user must select a repo first.
 
 ### Task Lifecycle
 
@@ -345,7 +342,7 @@ All voice prompts from the radio and keyboard input submitted in input mode are 
 
 **Keyboard input tracking:** in input mode, the console maintains a shadow buffer of typed characters. When Enter is pressed, the accumulated text is saved to the history log. The shadow buffer is cleared on mode exit (Escape).
 
-**History overlay:** pressing `h` in command mode opens a scrollable prompt history overlay. Each entry shows timestamp, source (MIC for voice, KBD for keyboard), target agent, and prompt text. Navigation: `j`/`k` or `Up`/`Down` to scroll, `g`/`G` for top/bottom, `Enter` to re-send the selected prompt to the current target, `Esc` to close.
+**History overlay:** a scrollable prompt history overlay showing timestamp, source (MIC for voice, KBD for keyboard), target agent, and prompt text. Navigation: `j`/`k` or `Up`/`Down` to scroll, `g`/`G` for top/bottom, `Enter` to re-send the selected prompt to the current target, `Esc` to close.
 
 ---
 
@@ -678,13 +675,8 @@ While in input mode, `Escape` is the only key intercepted by the console -- it i
 | `Shift+Tab`       | Cycle target backward across all pages                       |
 | `Right`             | Next page                                                  |
 | `Left`              | Previous page                                              |
-| `n`               | Dispatch new agent (repo selector in multi-repo mode)        |
-| `N`               | Dispatch new agent into a specific slot (prompts for slot number) |
 | `k`               | Kill agent in currently targeted slot (confirms first)       |
-| `R`               | Rename agent in currently targeted slot                      |
-| `S`               | Rescan repos (multi-repo mode only)                          |
 | `t`               | Show task list overlay (plan, active, queued, completed)             |
-| `h`               | Show prompt history overlay (browse and re-send past prompts) |
 | `o`               | Toggle orchestrator view (replaces agent grid with event log) |
 | `p`               | Show/hide full PSK                                           |
 | `x`               | Show connection info overlay (address, port, PSK)            |
