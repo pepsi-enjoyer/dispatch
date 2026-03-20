@@ -315,6 +315,8 @@ struct App {
     history_scroll: usize,        // selected index in the prompt history overlay
     // Persistent LLM orchestrator (dispatch-h62)
     orchestrator: Option<orchestrator::Orchestrator>,
+    // dispatch-guj: voice messages received before orchestrator is ready.
+    pending_voice: Vec<String>,
     // Broadcast channel for pushing chat messages to radio clients (dispatch-chat)
     chat_tx: tokio::sync::broadcast::Sender<String>,
 }
@@ -370,6 +372,7 @@ impl App {
             input_line_buf: String::new(),
             history_scroll: 0,
             orchestrator: None,
+            pending_voice: Vec::new(),
             chat_tx,
         }
     }
@@ -2593,9 +2596,20 @@ fn main() -> io::Result<()> {
         chat_tx,
     );
 
-    // dispatch-h62: orchestrator is spawned lazily on first voice transcript
-    // to avoid the heavy claude process consuming memory while idle.
-    app.push_ticker("ORCHESTRATOR: ready (will start on first voice input)".to_string());
+    // dispatch-guj: eagerly spawn orchestrator in background so it's warm
+    // by the time the first voice message arrives (eliminates first-message lag).
+    let orch_repos: Vec<String> = app.repo_list().iter().map(|s| s.to_string()).collect();
+    let orch_cwd = app.default_repo_root().to_string();
+    let (orch_ready_tx, orch_ready_rx) = mpsc::channel::<orchestrator::Orchestrator>();
+    thread::spawn(move || {
+        let repo_refs: Vec<&str> = orch_repos.iter().map(|s| s.as_str()).collect();
+        let tool_defs = tools::tool_definitions();
+        let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs);
+        if let Some(orch) = orchestrator::spawn(&system_prompt, &orch_cwd) {
+            let _ = orch_ready_tx.send(orch);
+        }
+    });
+    app.push_ticker("ORCHESTRATOR: starting...".to_string());
 
     // dispatch-sa1: show multi-repo indicator if applicable.
     if app.is_multi_repo() {
@@ -2847,30 +2861,31 @@ fn main() -> io::Result<()> {
         // Advance ticker animation each frame (dispatch-ami).
         app.tick_ticker();
 
+        // dispatch-guj: pick up background-spawned orchestrator when ready.
+        if app.orchestrator.is_none() {
+            if let Ok(orch) = orch_ready_rx.try_recv() {
+                app.orchestrator = Some(orch);
+                app.push_ticker("ORCHESTRATOR: online".to_string());
+                // Flush any voice messages that arrived before orchestrator was ready.
+                let pending: Vec<String> = app.pending_voice.drain(..).collect();
+                if let Some(orch) = &mut app.orchestrator {
+                    for msg in pending {
+                        orch.send_message(&format!("[MIC] {}", msg));
+                    }
+                }
+            }
+        }
+
         // Process events from the WebSocket thread (dispatch-1lc.1, dispatch-h62).
         while let Ok(event) = ws_event_rx.try_recv() {
             let ws_server::WsEvent::VoiceTranscript { text } = event;
             app.radio_state = RadioState::Connected;
             app.push_orch(OrchestratorEventKind::VoiceTranscript { text: text.clone() });
             app.push_chat("You", &text);
-            // Lazy-spawn orchestrator on first voice input.
-            if app.orchestrator.is_none() {
-                let repos: Vec<&str> = app.repo_list().iter().copied().collect();
-                let tool_defs = tools::tool_definitions();
-                let system_prompt = orchestrator::build_system_prompt(&repos, &tool_defs);
-                let orch_cwd = app.default_repo_root().to_string();
-                match orchestrator::spawn(&system_prompt, &orch_cwd) {
-                    Some(orch) => {
-                        app.orchestrator = Some(orch);
-                        app.push_ticker("ORCHESTRATOR: online".to_string());
-                    }
-                    None => {
-                        app.push_ticker("ORCHESTRATOR: failed to spawn".to_string());
-                    }
-                }
-            }
             if let Some(orch) = &mut app.orchestrator {
                 orch.send_message(&format!("[MIC] {}", text));
+            } else {
+                app.pending_voice.push(text);
             }
         }
 
