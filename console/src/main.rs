@@ -1942,7 +1942,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             let hints = if app.view_mode == ViewMode::Orchestrator {
                 " o:back  ?:help  q:quit"
             } else {
-                " Enter:input  n:new  x:kill  t:tasks  o:orch  ?:help  q:quit"
+                " Enter:input  k:kill  t:tasks  o:orch  ?:help  q:quit"
             };
             Line::from(vec![
                 Span::styled(
@@ -1986,7 +1986,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn render_help_overlay(f: &mut Frame, area: Rect) {
-    let r = centered_rect(52, 27, area);
+    let r = centered_rect(52, 22, area);
     f.render_widget(Clear, r);
     let lines = vec![
         Line::from(Span::styled(
@@ -2001,13 +2001,8 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::raw("  → / ←        Next / prev page")),
         Line::from(Span::raw("  PgUp / PgDn  Scroll output")),
         Line::from(Span::raw("  ↑ / ↓        Scroll orchestrator view")),
-        Line::from(Span::raw("  n            Dispatch (repo select in multi-repo)")),
-        Line::from(Span::raw("  N            Dispatch into specific slot")),
         Line::from(Span::raw("  k            Kill target agent")),
-        Line::from(Span::raw("  R            Rename target agent")),
-        Line::from(Span::raw("  S            Rescan repos (multi-repo mode)")),
         Line::from(Span::raw("  t            Task list overlay")),
-        Line::from(Span::raw("  h            Prompt history")),
         Line::from(Span::raw("  o            Toggle orchestrator view")),
         Line::from(Span::raw("  p            Toggle PSK visibility")),
         Line::from(Span::raw("  x            Show connection info")),
@@ -3267,53 +3262,11 @@ fn main() -> io::Result<()> {
                                     }
                                 }
 
-                                // Dispatch into first empty slot (dispatch-bgz.6)
-                                // dispatch-sa1: in multi-repo mode, open repo selector first.
-                                KeyCode::Char('n') => {
-                                    if app.is_multi_repo() {
-                                        app.repo_select_idx = 0;
-                                        app.overlay = Overlay::RepoSelect;
-                                    } else {
-                                        let target_repo = app.default_repo_root().to_string();
-                                        if let Some(g) = app.slots.iter().position(|s| s.is_none()) {
-                                            let cmd = app.tool_cmd("claude-code").to_string();
-                                            if let Some(slot) = dispatch_slot(
-                                                g, "claude-code", &cmd, app.pane_rows, app.pane_cols, None,
-                                                app.scrollback_lines, repo_name_from_path(&target_repo), &target_repo,
-                                                None,
-                                            ) {
-                                                let page = g / SLOTS_PER_PAGE;
-                                                let local = g % SLOTS_PER_PAGE;
-                                                let name = slot.display_name().to_string();
-                                                app.push_orch(OrchestratorEventKind::Dispatched { agent: name.clone(), slot: g + 1, tool: "claude-code".to_string() });
-                                                app.push_ticker(format!("DISPATCH: {} launched in slot {}", name, g + 1));
-                                                app.slots[g] = Some(slot);
-                                                app.current_page = page;
-                                                app.target = local;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                KeyCode::Char('N') => {
-                                    app.input_buf.clear();
-                                    app.overlay = Overlay::DispatchSlot;
-                                }
-
                                 // Terminate target agent (dispatch-bgz.6)
                                 KeyCode::Char('k') => {
                                     let target_g = app.target_global();
                                     if app.slots[target_g].is_some() {
                                         app.overlay = Overlay::ConfirmTerminate;
-                                    }
-                                }
-
-                                // Rename target agent (dispatch-bgz.3)
-                                KeyCode::Char('R') => {
-                                    let target_g = app.target_global();
-                                    if app.slots[target_g].is_some() {
-                                        app.input_buf.clear();
-                                        app.overlay = Overlay::Rename;
                                     }
                                 }
 
@@ -3325,12 +3278,6 @@ fn main() -> io::Result<()> {
                                     }
                                     app.overlay = Overlay::TaskList;
                                 }
-                                // Prompt history overlay (dispatch-ct2.8)
-                                KeyCode::Char('h') => {
-                                    app.history_scroll = 0;
-                                    app.overlay = Overlay::PromptHistory;
-                                }
-
                                 KeyCode::Char('p') => app.psk_expanded = !app.psk_expanded,
                                 KeyCode::Char('x') => app.overlay = Overlay::ConnectionInfo,
                                 KeyCode::Char('?') => app.overlay = Overlay::Help,
@@ -3342,14 +3289,6 @@ fn main() -> io::Result<()> {
                                         ViewMode::Orchestrator => ViewMode::Agents,
                                     };
                                     app.orch_scroll = 0;
-                                }
-
-                                // Rescan repos in multi-repo mode (dispatch-sa1)
-                                KeyCode::Char('S') if app.is_multi_repo() => {
-                                    let old_count = app.repo_list().len();
-                                    app.rescan_repos();
-                                    let new_count = app.repo_list().len();
-                                    app.push_ticker(format!("RESCAN: {} repos detected (was {})", new_count, old_count));
                                 }
 
                                 // Orchestrator scroll (dispatch-6nm)

@@ -104,12 +104,8 @@ The console displays four agent panes at a time in a 2x2 grid with a scrolling t
 | `Tab`             | Cycle target forward across all agents              |
 | `Right` / `Left`  | Next / previous page                                |
 | `PgUp` / `PgDn`   | Scroll pane output up/down                          |
-| `n`               | Dispatch new agent (repo select in multi-repo mode) |
 | `k`               | Kill agent in targeted slot                         |
-| `R`               | Rename agent in targeted slot                       |
-| `S`               | Rescan repos (multi-repo mode)                      |
 | `t`               | Show task list overlay                              |
-| `h`               | Show prompt history (browse and re-send)            |
 | `o`               | Toggle orchestrator view (event log)                |
 | `p`               | Show/hide full PSK                                  |
 | `x`               | Show connection info                                |
