@@ -116,7 +116,7 @@ The console displays four agent panes at a time in a 2x2 grid with a scrolling t
 | `q`               | Quit                                                |
 | `?`               | Toggle help overlay                                 |
 
-**Input mode** -- keystrokes go directly to the agent's terminal. Press `Escape` to return to command mode.
+**Input mode** -- keystrokes go directly to the agent's terminal. Press `Escape` to immediately return to command mode. Double-tap `Escape` to send a literal Escape to the PTY.
 
 ### Radio
 

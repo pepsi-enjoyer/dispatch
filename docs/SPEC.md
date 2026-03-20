@@ -664,9 +664,9 @@ Modal, vim-style. Two modes:
 | Transition       | Key         | Behavior                                           |
 |------------------|-------------|----------------------------------------------------|
 | Command -> Input | `Enter`     | Enter input mode on the currently targeted pane    |
-| Input -> Command | `Escape`    | Return to command mode                             |
+| Input -> Command | `Escape`    | Return to command mode (immediate)                 |
 
-While in input mode, `Escape` is the only key intercepted by the console. Everything else goes to the PTY. If the underlying tool uses `Escape`, press it twice.
+While in input mode, `Escape` is the only key intercepted by the console -- it immediately returns to command mode. Everything else goes to the PTY. To send a literal Escape to the PTY, double-tap `Escape` quickly (within 300ms): the first press exits input mode, the second press in command mode sends `\x1b` to the targeted pane.
 
 **Radio commands during input mode:** voice commands from the radio are always processed regardless of console mode. The two input channels (keyboard and radio) operate independently.
 
