@@ -13,6 +13,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use crate::types::{SlotState, NATO, MAX_SLOTS};
+use crate::util;
 
 /// Marker prefix that agents echo to send chat messages to the radio app.
 /// Usage: `echo "@@DISPATCH_MSG:your message here"`
@@ -97,9 +98,9 @@ pub fn dispatch_slot(
                         if byte == b'\n' {
                             if let Ok(line) = std::str::from_utf8(&line_buf) {
                                 if let Some(pos) = line.find(DISPATCH_MSG_MARKER) {
-                                    let msg = line[pos + DISPATCH_MSG_MARKER.len()..].trim();
+                                    let msg = util::strip_ansi(line[pos + DISPATCH_MSG_MARKER.len()..].trim());
                                     if !msg.is_empty() {
-                                        let _ = agent_msg_tx.send((global_idx, msg.to_string()));
+                                        let _ = agent_msg_tx.send((global_idx, msg));
                                     }
                                 }
                             }

@@ -44,6 +44,43 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Strip ANSI escape sequences from a string.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    // CSI sequence: consume until final byte (0x40-0x7E)
+                    for c2 in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c2) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC sequence: consume until ST (ESC \ or BEL)
+                    let mut prev = '\0';
+                    for c2 in chars.by_ref() {
+                        if c2 == '\x07' || (prev == '\x1b' && c2 == '\\') {
+                            break;
+                        }
+                        prev = c2;
+                    }
+                }
+                Some(c2) if ('\x40'..='\x5f').contains(&c2) => {
+                    // Other Fe sequences (single char after ESC)
+                }
+                _ => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Strip ```action ... ``` and <tool_call>...</tool_call> blocks from text,
 /// returning only the prose/reasoning portion for chat display (dispatch-chat).
 pub fn strip_action_blocks(text: &str) -> String {
