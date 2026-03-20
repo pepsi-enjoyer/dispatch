@@ -40,7 +40,7 @@ mod config;
 mod mdns;
 mod ws_server;
 
-use dispatch_core::{orchestrator, planner, tools};
+use dispatch_core::{orchestrator, tasks, tools};
 
 use clap::{Parser, Subcommand};
 use std::{
@@ -1033,7 +1033,7 @@ fn is_valid_callsign(name: &str) -> bool {
 //
 // A task is "ready" when status is [ ] and all -> deps are [x].
 
-use planner::{ParsedTask, parse_task_line};
+use tasks::{ParsedTask, parse_task_line};
 
 fn tasks_md_path(repo_root: &str) -> String {
     format!("{}/.dispatch/tasks.md", repo_root)
