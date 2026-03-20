@@ -163,4 +163,6 @@ pub struct App {
     pub pending_voice: Vec<String>,
     // Broadcast channel for pushing chat messages to radio clients
     pub chat_tx: tokio::sync::broadcast::Sender<String>,
+    // Status indicator blink frame counter (pulsing REC-light effect)
+    pub status_blink_frame: u16,
 }

@@ -1,6 +1,8 @@
 package com.dispatch.radio
 
 import android.Manifest
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -44,6 +46,9 @@ class MainActivity : AppCompatActivity() {
     // Chat log (dispatch-chat)
     private var chatMessageCount: Int = 0
 
+    // Status dot blink animator (REC-light pulse)
+    private var statusBlinkAnimator: ObjectAnimator? = null
+
     // UI views
     private lateinit var tvConnDot: TextView
     private lateinit var tvConnStatus: TextView
@@ -70,6 +75,7 @@ class MainActivity : AppCompatActivity() {
 
         bindViews()
         applyScreenOnFlag()
+        startStatusBlink()
 
         // Request microphone permission for speech recognition
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
@@ -355,6 +361,18 @@ class MainActivity : AppCompatActivity() {
         tvConnDot.setTextColor(getColor(color))
         tvConnStatus.setTextColor(getColor(color))
         tvConnStatus.text = statusText
+        startStatusBlink()
+    }
+
+    /** Pulse the status dot alpha like a REC indicator light (~1s cycle). */
+    private fun startStatusBlink() {
+        statusBlinkAnimator?.cancel()
+        tvConnDot.alpha = 1f
+        statusBlinkAnimator = ObjectAnimator.ofFloat(tvConnDot, "alpha", 1f, 0f, 1f).apply {
+            duration = 1000L
+            repeatCount = ValueAnimator.INFINITE
+            start()
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -404,6 +422,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        statusBlinkAnimator?.cancel()
         VolumeKeyBridge.onKeyEvent = null
         VolumeKeyBridge.isActivityInForeground = false
         pttManager.destroy()
