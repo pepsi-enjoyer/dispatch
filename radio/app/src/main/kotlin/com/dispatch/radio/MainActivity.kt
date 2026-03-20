@@ -25,7 +25,7 @@ import com.google.gson.JsonObject
  * Single-activity entry point for Dispatch Radio (dispatch-88k.1).
  *
  * Volume Down -> push-to-talk via SpeechRecognizer (dispatch-88k.2)
- * Volume Up   -> target cycling / quick dispatch (dispatch-88k.4)
+ * Volume Up   -> agent status / quick dispatch (dispatch-88k.4)
  *
  * Integrates: WebSocket client (dispatch-88k.5), UI (dispatch-88k.6),
  *             settings (dispatch-88k.7), haptics (dispatch-88k.8).
@@ -87,10 +87,7 @@ class MainActivity : AppCompatActivity() {
         volumeUpHandler = VolumeUpHandler(
             context = this,
             haptics = haptics,
-            onCycleTarget = { agent ->
-                currentSlot = agent.slot
-                wsClient?.send("""{"type":"set_target","slot":${agent.slot}}""")
-            },
+            onStatusRequest = { agentList -> showAgentStatus(agentList) },
             onQuickDispatch = { tool ->
                 wsClient?.send("""{"type":"dispatch","tool":"$tool"}""")
             }
@@ -240,7 +237,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         return when (keyCode) {
-            KeyEvent.KEYCODE_VOLUME_UP -> volumeUpHandler.onKeyDown(agents, currentSlot)
+            KeyEvent.KEYCODE_VOLUME_UP -> volumeUpHandler.onKeyDown()
             KeyEvent.KEYCODE_VOLUME_DOWN -> {
                 if (event.repeatCount == 0) {
                     if (settings.continuousListening) {
@@ -257,7 +254,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
         return when (keyCode) {
-            KeyEvent.KEYCODE_VOLUME_UP -> volumeUpHandler.onKeyUp(agents, currentSlot)
+            KeyEvent.KEYCODE_VOLUME_UP -> volumeUpHandler.onKeyUp(agents)
             KeyEvent.KEYCODE_VOLUME_DOWN -> {
                 if (!settings.continuousListening) {
                     pttManager.stopListening()
@@ -287,6 +284,31 @@ class MainActivity : AppCompatActivity() {
     private fun handleTranscript(transcript: String) {
         val msg = """{"type":"send","text":${gson.toJson(transcript)},"auto":true}"""
         wsClient?.send(msg)
+    }
+
+    /** Show agent status summary in the chat log (Volume Up short press). */
+    private fun showAgentStatus(agentList: List<Agent>) {
+        val active = agentList.filter { it.status == "busy" }
+        val idle = agentList.filter { it.status == "idle" }
+
+        val summary = buildString {
+            if (active.isEmpty() && idle.isEmpty()) {
+                append("No agents online")
+            } else {
+                if (active.isNotEmpty()) {
+                    append(active.joinToString(", ") { agent ->
+                        val taskSuffix = if (!agent.task.isNullOrBlank()) " -- ${agent.task}" else ""
+                        "${agent.callsign}: busy$taskSuffix"
+                    })
+                }
+                if (idle.isNotEmpty()) {
+                    if (active.isNotEmpty()) append(" | ")
+                    append(idle.joinToString(", ") { "${it.callsign}: idle" })
+                }
+            }
+        }
+
+        addChatMessage("System", summary)
     }
 
     private fun handleMessage(text: String) {

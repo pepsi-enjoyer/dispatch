@@ -6,10 +6,10 @@ import android.os.Looper
 import com.dispatch.radio.model.Agent
 
 /**
- * Handles Volume Up key events for target cycling and quick dispatch.
+ * Handles Volume Up key events for agent status and quick dispatch.
  *
- * Short press (key down, key up < 1s): cycle to next occupied slot,
- *   send set_target, display new callsign, short vibration.
+ * Short press (key down, key up < 1s): show agent status summary
+ *   via [onStatusRequest] so the user can see which agents are active.
  *
  * Long press (key down held > 1s): show agent type picker overlay,
  *   tap selection dispatches a new agent.
@@ -22,7 +22,7 @@ import com.dispatch.radio.model.Agent
 class VolumeUpHandler(
     private val context: Context,
     private val haptics: HapticFeedback,
-    private val onCycleTarget: (agent: Agent) -> Unit,
+    private val onStatusRequest: (agents: List<Agent>) -> Unit,
     private val onQuickDispatch: (tool: String) -> Unit
 ) {
     companion object {
@@ -43,21 +43,18 @@ class VolumeUpHandler(
     }
 
     /** Call from Activity.onKeyDown for KEYCODE_VOLUME_UP. Returns true to consume. */
-    fun onKeyDown(@Suppress("UNUSED_PARAMETER") agents: List<Agent>, @Suppress("UNUSED_PARAMETER") currentSlot: Int): Boolean {
+    fun onKeyDown(): Boolean {
         longPressTriggered = false
         handler.postDelayed(longPressRunnable, LONG_PRESS_MS)
         return true
     }
 
     /** Call from Activity.onKeyUp for KEYCODE_VOLUME_UP. Returns true to consume. */
-    fun onKeyUp(agents: List<Agent>, currentSlot: Int): Boolean {
+    fun onKeyUp(agents: List<Agent>): Boolean {
         handler.removeCallbacks(longPressRunnable)
         if (!longPressTriggered) {
-            val next = TargetCycler().cycle(agents, currentSlot)
-            if (next != null) {
-                haptics.shortPulse()
-                onCycleTarget(next)
-            }
+            haptics.shortPulse()
+            onStatusRequest(agents)
         }
         return true
     }
