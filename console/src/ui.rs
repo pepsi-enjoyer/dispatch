@@ -476,7 +476,7 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         .get(target_g)
         .and_then(|s| s.as_ref())
         .map(|a| a.display_name().to_string())
-        .unwrap_or_else(|| format!("[{}]", target_g + 1));
+        .unwrap_or_else(|| format!("Slot {}", target_g + 1));
 
     let content = match app.mode {
         Mode::Command => {
