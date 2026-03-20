@@ -11,17 +11,10 @@
 // dispatch-bgz.6: PTY management (dispatch, terminate, resize, prompt injection)
 // dispatch-bgz.7: WebSocket server with PSK authentication
 // dispatch-bgz.8: WebSocket protocol (ws_server + protocol modules)
-// dispatch-bgz.9: beads task lifecycle (create, assign, close, reopen)
 // dispatch-bgz.10: pane info strip and header bar
-// dispatch-bgz.11: standby pane (empty slot display + queued task list)
 // dispatch-bgz.12: config file and CLI subcommands
 // dispatch-ami: LED-style scrolling ticker line between header and panes
-// dispatch-1lc.1: task queuing — auto-dispatch unaddressed prompts from radio
-// dispatch-1lc.2: idle agent pickup — idle prompt detection, inactivity timeout, auto task pickup
 // dispatch-xje: git worktree-per-task isolation
-// dispatch-1lc.3: task dependencies — -> arrow syntax in .dispatch/tasks.md, file-based task ops
-// dispatch-1lc.4: task list overlay — full-screen plan view with status groups and agent assignments
-// dispatch-1lc.3: task dependencies — -> arrow syntax in .dispatch/tasks.md, dependency-aware dispatch
 // dispatch-ct2.4: terminal scrollback in panes — PgUp/PgDn in command mode, configurable buffer
 // dispatch-sa1: multi-repo support — detect non-repo parent, scan children for git repos
 // dispatch-ct2.8: prompt history — log voice/keyboard prompts to file, browsable history overlay
@@ -39,12 +32,10 @@ mod config;
 mod mdns;
 mod ws_server;
 
-use dispatch_core::{orchestrator, tasks, tools};
+use dispatch_core::{orchestrator, tools};
 
 use clap::{Parser, Subcommand};
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
     io::{self, Read, Write},
     process::{Command, Stdio},
     sync::{
@@ -96,8 +87,6 @@ enum Commands {
 const MAX_SLOTS: usize = 26;
 /// Slots per page (2×2 grid).
 const SLOTS_PER_PAGE: usize = 4;
-const TASK_POLL_SECS: u64 = 5;
-
 const NATO: &[&str] = &[
     "ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOXTROT", "GOLF", "HOTEL", "INDIA", "JULIET",
     "KILO", "LIMA", "MIKE", "NOVEMBER", "OSCAR", "PAPA", "QUEBEC", "ROMEO", "SIERRA", "TANGO",
@@ -142,12 +131,6 @@ struct OrchestratorEvent {
 enum OrchestratorEventKind {
     /// Voice transcript received from radio.
     VoiceTranscript { text: String },
-    /// Task created in tasks.md.
-    TaskCreated { id: String, title: String },
-    /// Task assigned to an agent slot.
-    TaskAssigned { id: String, agent: String, slot: usize },
-    /// Task completed (idle detected or timeout).
-    TaskComplete { id: String, agent: String },
     /// Worktree merged successfully.
     Merged { id: String },
     /// Merge conflict.
@@ -156,8 +139,6 @@ enum OrchestratorEventKind {
     Dispatched { agent: String, slot: usize, tool: String },
     /// Agent terminated.
     Terminated { agent: String, slot: usize },
-    /// All agents busy, task queued.
-    Queued { id: String },
     /// Orchestrator reasoning text (dispatch-h62).
     OrchestratorText { text: String },
     /// Tool call issued by orchestrator (dispatch-h62).
@@ -180,7 +161,6 @@ enum Workspace {
 enum Overlay {
     None,
     Help,
-    TaskList,
     ConnectionInfo,
     ConfirmQuit,
     ConfirmTerminate,
@@ -203,8 +183,6 @@ struct SlotState {
     callsign: String,            // NATO default (slot-bound)
     custom_name: Option<String>, // user rename (dispatch-bgz.3)
     tool: String,
-    task_id: Option<String>,
-    worktree_path: Option<String>, // git worktree path for this task (dispatch-xje)
     repo_name: String,             // short repo dir name for grid header (dispatch-2dc)
     repo_root: String,             // absolute repo root for this slot (dispatch-sa1)
     dispatch_time: Instant,
@@ -216,10 +194,6 @@ struct SlotState {
     child_pid: Option<u32>,
     // Keep master alive for resize (dispatch-bgz.6)
     master: Box<dyn portable_pty::MasterPty>,
-    // Task completion detection (dispatch-1lc.2)
-    last_output_at: Instant,     // when screen content last changed
-    last_screen_hash: u64,       // hash of screen to detect changes
-    idle_since: Option<Instant>, // when idle prompt was first seen (for 500ms debounce)
     // Scrollback (dispatch-ct2.4): lines scrolled back from bottom
     scroll_offset: usize,
 }
@@ -228,23 +202,6 @@ impl SlotState {
     fn display_name(&self) -> &str {
         self.custom_name.as_deref().unwrap_or(&self.callsign)
     }
-}
-
-/// A task ready to be dispatched (dispatch-bgz.11).
-#[derive(Clone)]
-struct QueuedTask {
-    id: String,
-    title: String,
-}
-
-/// A task entry for the task list overlay (dispatch-1lc.4).
-#[derive(Clone)]
-struct TaskEntry {
-    id: String,
-    title: String,
-    status: String,        // "open", "in_progress", "closed"
-    agent: Option<String>, // agent display name if currently in a slot
-    deps: Vec<String>,     // dependency IDs from -> arrows (dispatch-1lc.3)
 }
 
 /// A recorded prompt for the history log (dispatch-ct2.8).
@@ -277,19 +234,15 @@ struct App {
     overlay: Overlay,
     /// Shared input buffer for DispatchSlot and Rename overlays.
     input_buf: String,
-    queued_tasks: Vec<QueuedTask>,
     ws_state: ws_server::SharedState,
     pane_rows: u16,
     pane_cols: u16,
     tools: std::collections::HashMap<String, String>,
-    completion_timeout: Duration,
     // Ticker (dispatch-ami): LED-style scrolling marquee
     ticker_queue: std::collections::VecDeque<String>,
     ticker_current: String,
     ticker_offset: usize,
     ticker_frame_counter: u8,
-    /// Task IDs with unresolved merge conflicts (dispatch-xje).
-    conflict_tasks: Vec<String>,
     /// Absolute path to the target repo root (dispatch-xje).
     /// In single-repo mode: the git repo root. In multi-repo mode: the parent directory.
     repo_root: String,
@@ -297,8 +250,6 @@ struct App {
     workspace: Workspace,
     /// Currently highlighted repo in the RepoSelect overlay (dispatch-sa1).
     repo_select_idx: usize,
-    // Task list overlay cache (dispatch-1lc.4): loaded when overlay opens
-    task_list_data: Vec<TaskEntry>,
     // Scrollback config (dispatch-ct2.4)
     scrollback_lines: u32,
     // Orchestrator log view (dispatch-6nm)
@@ -325,7 +276,6 @@ impl App {
         pane_rows: u16,
         pane_cols: u16,
         tools: std::collections::HashMap<String, String>,
-        completion_timeout: Duration,
         repo_root: String,
         workspace: Workspace,
         scrollback_lines: u32,
@@ -344,21 +294,17 @@ impl App {
             psk_expanded: false,
             overlay: Overlay::None,
             input_buf: String::new(),
-            queued_tasks: Vec::new(),
             ws_state,
             pane_rows,
             pane_cols,
             tools,
-            completion_timeout,
             ticker_queue: std::collections::VecDeque::new(),
             ticker_current: String::new(),
             ticker_offset: 0,
             ticker_frame_counter: 0,
-            conflict_tasks: Vec::new(),
             repo_root,
             workspace,
             repo_select_idx: 0,
-            task_list_data: Vec::new(),
             scrollback_lines,
             view_mode: ViewMode::Agents,
             orch_log: Vec::new(),
@@ -454,26 +400,6 @@ impl App {
         } else {
             "****".to_string()
         }
-    }
-
-    /// True if `global_idx` is the last empty slot on the last page (dispatch-bgz.11).
-    fn is_last_standby(&self, global_idx: usize) -> bool {
-        if self.slots[global_idx].is_some() {
-            return false;
-        }
-        let total = self.total_pages();
-        let page = global_idx / SLOTS_PER_PAGE;
-        if page != total - 1 {
-            return false;
-        }
-        let local = global_idx % SLOTS_PER_PAGE;
-        for i in (local + 1)..SLOTS_PER_PAGE {
-            let g = page * SLOTS_PER_PAGE + i;
-            if g < MAX_SLOTS && self.slots[g].is_none() {
-                return false;
-            }
-        }
-        true
     }
 
     fn tool_cmd(&self, tool_key: &str) -> &str {
@@ -577,17 +503,8 @@ impl App {
     pub fn execute_tool(&mut self, call: &tools::ToolCall) -> tools::ToolResult {
         match call {
             tools::ToolCall::Dispatch { repo: _, prompt } => {
-                // Find an idle slot (has PTY but no task) or an empty slot.
-                let slot_idx = self.slots.iter().enumerate().find_map(|(i, s)| {
-                    match s {
-                        Some(slot) if slot.task_id.is_none() => Some(i),
-                        _ => None,
-                    }
-                }).or_else(|| {
-                    self.slots.iter().position(|s| s.is_none())
-                });
-
-                let slot_idx = match slot_idx {
+                // Find an empty slot.
+                let slot_idx = match self.slots.iter().position(|s| s.is_none()) {
                     Some(i) => i,
                     None => return tools::ToolResult::Error {
                         message: "no available slots".to_string(),
@@ -596,49 +513,34 @@ impl App {
 
                 let target_repo = self.default_repo_root().to_string();
 
-                // Create task in tasks.md.
-                let task_id = match create_task_in_file(&target_repo, prompt) {
-                    Some(id) => id,
-                    None => return tools::ToolResult::Error {
-                        message: "failed to create task".to_string(),
-                    },
-                };
+                // Generate a branch ID for the worktree.
+                let task_id = format!("agent-{}", slot_idx + 1);
 
-                // Create worktree.
+                // Create worktree for git isolation.
                 let worktree = create_worktree(&task_id, &target_repo);
 
                 // Determine callsign before spawn so it can be included in the prompt.
                 let callsign_for_prompt = dispatch_core::protocol::default_callsign((slot_idx + 1) as u32).to_string();
                 let full_prompt = format!("Your callsign is {}. {}", callsign_for_prompt, prompt);
 
-                // Spawn PTY if slot is empty.
-                if self.slots[slot_idx].is_none() {
-                    let cmd = self.tool_cmd("claude-code").to_string();
-                    match dispatch_slot(
-                        slot_idx, "claude-code", &cmd, self.pane_rows, self.pane_cols,
-                        worktree.as_deref(), self.scrollback_lines,
-                        repo_name_from_path(&target_repo), &target_repo,
-                        Some(&full_prompt),
-                    ) {
-                        Some(slot) => { self.slots[slot_idx] = Some(slot); }
-                        None => return tools::ToolResult::Error {
-                            message: "failed to spawn agent PTY".to_string(),
-                        },
-                    }
+                // Spawn PTY.
+                let cmd = self.tool_cmd("claude-code").to_string();
+                match dispatch_slot(
+                    slot_idx, "claude-code", &cmd, self.pane_rows, self.pane_cols,
+                    worktree.as_deref(), self.scrollback_lines,
+                    repo_name_from_path(&target_repo), &target_repo,
+                    Some(&full_prompt),
+                ) {
+                    Some(slot) => { self.slots[slot_idx] = Some(slot); }
+                    None => return tools::ToolResult::Error {
+                        message: "failed to spawn agent PTY".to_string(),
+                    },
                 }
 
-                // Assign task to slot.
-                let callsign = {
-                    let slot = self.slots[slot_idx].as_mut().unwrap();
-                    update_task_in_file(&target_repo, &task_id, '~', Some(&slot.callsign));
-                    slot.task_id = Some(task_id.clone());
-                    slot.worktree_path = worktree;
-                    slot.last_output_at = Instant::now();
-                    slot.display_name().to_string()
-                };
+                let callsign = self.slots[slot_idx].as_ref().unwrap().display_name().to_string();
 
-                self.push_orch(OrchestratorEventKind::TaskAssigned {
-                    id: task_id.clone(), agent: callsign.clone(), slot: slot_idx + 1,
+                self.push_orch(OrchestratorEventKind::Dispatched {
+                    agent: callsign.clone(), slot: slot_idx + 1, tool: "claude-code".to_string(),
                 });
                 self.push_ticker(format!(
                     "DISPATCH: {} -> {} (slot {})", task_id, callsign, slot_idx + 1
@@ -681,13 +583,7 @@ impl App {
                 };
 
                 let callsign = self.slots[idx].as_ref().unwrap().display_name().to_string();
-                let slot_repo = self.slots[idx].as_ref().unwrap().repo_root.clone();
-                let task_id = terminate_slot(&mut self.slots[idx]);
-
-                // Reopen task if assigned.
-                if let Some(ref id) = task_id {
-                    update_task_in_file(&slot_repo, id, ' ', None);
-                }
+                terminate_slot(&mut self.slots[idx]);
 
                 self.push_orch(OrchestratorEventKind::Terminated {
                     agent: callsign.clone(), slot: idx + 1,
@@ -714,7 +610,6 @@ impl App {
                 let target_repo = self.default_repo_root().to_string();
                 let success = merge_worktree(task_id, &target_repo);
                 if success {
-                    update_task_in_file(&target_repo, task_id, 'x', None);
                     self.push_orch(OrchestratorEventKind::Merged { id: task_id.clone() });
                     self.push_ticker(format!("MERGED: task/{}", task_id));
                     self.push_chat("Dispatcher", &format!("Merged task/{} into main.", task_id));
@@ -724,7 +619,6 @@ impl App {
                         message: format!("task/{} merged into main", task_id),
                     }
                 } else {
-                    self.conflict_tasks.push(task_id.clone());
                     self.push_orch(OrchestratorEventKind::MergeConflict { id: task_id.clone() });
                     self.push_ticker(format!("CONFLICT: task/{} — merge aborted", task_id));
                     self.push_chat("Dispatcher", &format!("Merge conflict on task/{}.", task_id));
@@ -743,8 +637,8 @@ impl App {
                             slot: (i + 1) as u32,
                             callsign: slot.display_name().to_string(),
                             tool: slot.tool.clone(),
-                            status: if slot.task_id.is_some() { "busy".to_string() } else { "idle".to_string() },
-                            task: slot.task_id.clone(),
+                            status: "active".to_string(),
+                            task: None,
                             repo: Some(slot.repo_name.clone()),
                         })
                     })
@@ -783,7 +677,6 @@ impl App {
                 let msg = format!("{}\r", text);
                 let _ = slot.writer.write_all(msg.as_bytes());
                 let _ = slot.writer.flush();
-                slot.last_output_at = Instant::now();
 
                 self.push_chat("Dispatcher", &format!("Message to {}: {}", agent_name, text));
 
@@ -914,8 +807,6 @@ fn dispatch_slot(
         callsign,
         custom_name: None,
         tool: tool_key.to_string(),
-        task_id: None,
-        worktree_path: None,
         repo_name: repo_name.to_string(),
         repo_root: repo_root.to_string(),
         dispatch_time: now,
@@ -925,9 +816,6 @@ fn dispatch_slot(
         child_exited,
         child_pid,
         master: pair.master,
-        last_output_at: now,
-        last_screen_hash: 0,
-        idle_since: None,
         scroll_offset: 0,
     })
 }
@@ -948,16 +836,14 @@ fn kill_child_pid(pid: u32) {
     }
 }
 
-/// Terminate a slot: kill child, clear slot, return task_id for beads reopen.
-fn terminate_slot(slot: &mut Option<SlotState>) -> Option<String> {
+/// Terminate a slot: kill child, clear slot.
+fn terminate_slot(slot: &mut Option<SlotState>) {
     if let Some(s) = slot.as_ref() {
         if let Some(pid) = s.child_pid {
             kill_child_pid(pid);
         }
     }
-    let task_id = slot.as_ref().and_then(|s| s.task_id.clone());
     *slot = None;
-    task_id
 }
 
 /// Resize all active PTYs to the new pane size (dispatch-bgz.6).
@@ -986,262 +872,6 @@ fn is_valid_callsign(name: &str) -> bool {
     }
     let upper = name.to_uppercase();
     !RESERVED_CALLSIGNS.contains(&upper.as_str())
-}
-
-// ── .dispatch/tasks.md parsing (dispatch-1lc.3) ─────────────────────────────
-//
-// Task format:
-//   - [ ] t1: Description                    (open, no deps)
-//   - [ ] t2: Description -> t1              (open, blocked by t1)
-//   - [~] t3: Description | agent: Alpha     (in progress)
-//   - [x] t4: Description                    (done)
-//
-// A task is "ready" when status is [ ] and all -> deps are [x].
-
-use tasks::{ParsedTask, parse_task_line};
-
-fn tasks_md_path(repo_root: &str) -> String {
-    format!("{}/.dispatch/tasks.md", repo_root)
-}
-
-/// Read and parse .dispatch/tasks.md. Returns (all lines, parsed tasks).
-fn parse_tasks_md(repo_root: &str) -> (Vec<String>, Vec<ParsedTask>) {
-    let path = tasks_md_path(repo_root);
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return (vec![], vec![]),
-    };
-    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-    let mut tasks = Vec::new();
-    for (idx, line) in lines.iter().enumerate() {
-        if let Some(task) = parse_task_line(line, idx) {
-            tasks.push(task);
-        }
-    }
-    (lines, tasks)
-}
-
-/// Reconstruct a task line from parsed components.
-fn format_task_line(task: &ParsedTask) -> String {
-    let mut line = format!("{}- [{}] {}: {}", task.prefix, task.status, task.id, task.title);
-    if !task.deps.is_empty() {
-        line.push_str(&format!(" -> {}", task.deps.join(", ")));
-    }
-    if let Some(agent) = &task.agent {
-        line.push_str(&format!(" | agent: {}", agent));
-    }
-    line
-}
-
-/// Fetch tasks ready for dispatch: status [ ] with all -> deps marked [x].
-fn fetch_ready_tasks(repo_root: &str) -> Vec<QueuedTask> {
-    let (_, tasks) = parse_tasks_md(repo_root);
-    let done: std::collections::HashSet<&str> = tasks
-        .iter()
-        .filter(|t| t.status == 'x')
-        .map(|t| t.id.as_str())
-        .collect();
-    tasks
-        .iter()
-        .filter(|t| t.status == ' ' && t.deps.iter().all(|d| done.contains(d.as_str())))
-        .map(|t| QueuedTask { id: t.id.clone(), title: t.title.clone() })
-        .collect()
-}
-
-/// Update a task's status and agent annotation in .dispatch/tasks.md.
-fn update_task_in_file(repo_root: &str, id: &str, new_status: char, agent: Option<&str>) -> bool {
-    let (mut lines, tasks) = parse_tasks_md(repo_root);
-    let task = match tasks.iter().find(|t| t.id == id) {
-        Some(t) => t,
-        None => return false,
-    };
-    let updated = ParsedTask {
-        id: task.id.clone(),
-        title: task.title.clone(),
-        status: new_status,
-        deps: task.deps.clone(),
-        agent: agent.map(|s| s.to_string()),
-        line_idx: task.line_idx,
-        prefix: task.prefix.clone(),
-    };
-    lines[task.line_idx] = format_task_line(&updated);
-    let path = tasks_md_path(repo_root);
-    std::fs::write(&path, lines.join("\n") + "\n").is_ok()
-}
-
-/// Create a new task entry in .dispatch/tasks.md. Returns the generated ID.
-fn create_task_in_file(repo_root: &str, prompt: &str) -> Option<String> {
-    let dispatch_dir = format!("{}/.dispatch", repo_root);
-    let _ = std::fs::create_dir_all(&dispatch_dir);
-
-    let (lines, tasks) = parse_tasks_md(repo_root);
-
-    // Next sequential ID: find highest top-level t{N} and increment.
-    let max_num = tasks
-        .iter()
-        .filter_map(|t| {
-            let num = t.id.strip_prefix('t')?;
-            if num.contains('.') { return None; }
-            num.parse::<u32>().ok()
-        })
-        .max()
-        .unwrap_or(0);
-    let new_id = format!("t{}", max_num + 1);
-    let new_line = format!("- [ ] {}: {}", new_id, prompt);
-
-    let path = tasks_md_path(repo_root);
-    let content = if lines.is_empty() {
-        format!("# Tasks\n\n{}\n", new_line)
-    } else {
-        let mut c = lines.join("\n");
-        if !c.ends_with('\n') {
-            c.push('\n');
-        }
-        c.push_str(&new_line);
-        c.push('\n');
-        c
-    };
-    std::fs::write(&path, &content).ok()?;
-    Some(new_id)
-}
-
-/// Fetch all tasks for the task list overlay (dispatch-1lc.3, dispatch-1lc.4).
-/// Cross-references with active agent slots to annotate in-progress tasks.
-fn fetch_task_list_from_file(
-    repo_root: &str,
-    slots: &[Option<SlotState>; MAX_SLOTS],
-) -> Vec<TaskEntry> {
-    let mut slot_map: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for slot in slots.iter().flatten() {
-        if let Some(id) = &slot.task_id {
-            slot_map.insert(id.clone(), slot.display_name().to_string());
-        }
-    }
-
-    let (_, tasks) = parse_tasks_md(repo_root);
-    tasks
-        .iter()
-        .map(|t| {
-            let status = match t.status {
-                '~' => "in_progress",
-                'x' => "closed",
-                _ => "open",
-            };
-            let agent = slot_map.get(&t.id).cloned().or_else(|| t.agent.clone());
-            TaskEntry {
-                id: t.id.clone(),
-                title: t.title.clone(),
-                status: status.to_string(),
-                agent,
-                deps: t.deps.clone(),
-            }
-        })
-        .collect()
-}
-
-
-/// Dispatch ready tasks from .dispatch/tasks.md to available agents. Returns the
-/// number dispatched. Called after task completion to fill newly unblocked tasks.
-fn dispatch_ready_tasks(app: &mut App) -> usize {
-    let ready = fetch_ready_tasks(&app.repo_root);
-    let pane_rows = app.pane_rows;
-    let pane_cols = app.pane_cols;
-    let repo_root = app.repo_root.clone();
-    let tool_cmd = app.tool_cmd("claude-code").to_string();
-    let scrollback = app.scrollback_lines;
-    let short_repo = repo_name_from_path(&repo_root).to_string();
-    let mut dispatched = 0;
-
-    for task in ready {
-        // Find an idle slot (has PTY but no task) or an empty slot.
-        let slot_idx = app.slots.iter().enumerate().find_map(|(i, s)| {
-            match s {
-                Some(slot) if slot.task_id.is_none() => Some(i),
-                _ => None,
-            }
-        }).or_else(|| {
-            app.slots.iter().position(|s| s.is_none())
-        });
-
-        let slot_idx = match slot_idx {
-            Some(i) => i,
-            None => break, // No available slots; remaining tasks stay queued.
-        };
-
-        // Spawn PTY if slot is empty.
-        if app.slots[slot_idx].is_none() {
-            let worktree = create_worktree(&task.id, &repo_root);
-            if let Some(slot) = dispatch_slot(
-                slot_idx, "claude-code", &tool_cmd, pane_rows, pane_cols,
-                worktree.as_deref(), scrollback, &short_repo, &repo_root,
-                Some(&task.title),
-            ) {
-                app.slots[slot_idx] = Some(slot);
-            } else {
-                continue;
-            }
-        }
-
-        // Assign the task to the slot.
-        let display_name = {
-            let slot = app.slots[slot_idx].as_mut().unwrap();
-            update_task_in_file(&repo_root, &task.id, '~', Some(&slot.callsign));
-            let worktree = create_worktree(&task.id, &repo_root);
-            slot.task_id = Some(task.id.clone());
-            slot.worktree_path = worktree;
-            slot.last_output_at = Instant::now();
-            slot.display_name().to_string()
-        };
-        app.push_orch(OrchestratorEventKind::TaskAssigned { id: task.id.clone(), agent: display_name.clone(), slot: slot_idx + 1 });
-        app.push_ticker(format!(
-            "DISPATCH: {} -> {} (slot {})",
-            task.id, display_name, slot_idx + 1
-        ));
-        dispatched += 1;
-    }
-    dispatched
-}
-
-// ── task completion detection (dispatch-1lc.2) ────────────────────────────────
-
-/// Extract the text content of a single screen row, trimming trailing spaces.
-fn screen_row_text(screen: &vt100::Screen, row: u16) -> String {
-    let mut s = String::new();
-    for col in 0..screen.size().1 {
-        if let Some(cell) = screen.cell(row, col) {
-            let ch = cell.contents();
-            s.push_str(if ch.is_empty() { " " } else { &ch });
-        }
-    }
-    s.trim_end().to_string()
-}
-
-/// Hash all screen content to detect changes without storing the full buffer.
-fn compute_screen_hash(screen: &vt100::Screen) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for row in 0..screen.size().0 {
-        screen_row_text(screen, row).hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-/// Return true if the last non-blank row of the screen matches the idle prompt
-/// pattern for the given tool.
-///
-/// claude-code idle: last non-blank row is exactly ">" or "> "
-fn is_idle_prompt(screen: &vt100::Screen, tool: &str) -> bool {
-    if tool != "claude-code" {
-        return false;
-    }
-    let (rows, _) = screen.size();
-    for r in (0..rows).rev() {
-        let text = screen_row_text(screen, r);
-        if !text.is_empty() {
-            return text == ">" || text == "> ";
-        }
-    }
-    false
 }
 
 // ── worktree helpers (dispatch-xje) ───────────────────────────────────────────
@@ -1540,18 +1170,9 @@ fn pane_info_strip(global_idx: usize, local_idx: usize, app: &App) -> Text<'stat
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
             ]);
-            let task_span = match &agent.task_id {
-                Some(id) => Span::styled(id.clone(), Style::default().fg(Color::Yellow)),
-                None => Span::styled("idle", Style::default().fg(Color::DarkGray)),
-            };
             let line2 = Line::from(vec![
                 Span::styled(
-                    format!("  {} | ", agent.tool.to_uppercase()),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                task_span,
-                Span::styled(
-                    format!(" | {}", agent.repo_name),
+                    format!("  {} | {}", agent.tool.to_uppercase(), agent.repo_name),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]);
@@ -1569,49 +1190,22 @@ fn pane_info_strip(global_idx: usize, local_idx: usize, app: &App) -> Text<'stat
     }
 }
 
-fn standby_body(global_idx: usize, app: &App) -> Vec<Line<'static>> {
+fn standby_body(_global_idx: usize, _app: &App) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(""));
-
-    if app.is_last_standby(global_idx) {
-        lines.push(Line::from(Span::styled(
-            format!(" Queued tasks: {}", app.queued_tasks.len()),
-            Style::default().fg(Color::Yellow),
-        )));
-        lines.push(Line::from(""));
-        for task in app.queued_tasks.iter().take(6) {
-            let title_truncated = if task.title.len() > 24 {
-                format!("{}...", &task.title[..21])
-            } else {
-                task.title.clone()
-            };
-            lines.push(Line::from(Span::styled(
-                format!("  {}  \"{}\"", task.id, title_truncated),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-        if app.queued_tasks.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "  (none)",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-    } else {
-        lines.push(Line::from(Span::styled(
-            " Dispatch new agent:",
-            Style::default().fg(Color::DarkGray),
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  [c] claude-code",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            "  [g] gh copilot",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        )));
-    }
-
+    lines.push(Line::from(Span::styled(
+        " Dispatch new agent:",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  [c] claude-code",
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  [g] gh copilot",
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+    )));
     lines
 }
 
@@ -1745,21 +1339,6 @@ fn render_orchestrator(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::Green),
                 format!("\"{}\"", text),
             ),
-            OrchestratorEventKind::TaskCreated { id, title } => (
-                "TASK",
-                Style::default().fg(Color::Cyan),
-                format!("created {}: {}", id, truncate(title, 60)),
-            ),
-            OrchestratorEventKind::TaskAssigned { id, agent, slot } => (
-                "ASSIGN",
-                Style::default().fg(Color::Yellow),
-                format!("{} -> {} (slot {})", id, agent, slot),
-            ),
-            OrchestratorEventKind::TaskComplete { id, agent } => (
-                "DONE",
-                Style::default().fg(Color::Green),
-                format!("{} completed by {}", id, agent),
-            ),
             OrchestratorEventKind::Merged { id } => (
                 "MERGE",
                 Style::default().fg(Color::Green),
@@ -1779,11 +1358,6 @@ fn render_orchestrator(f: &mut Frame, area: Rect, app: &App) {
                 "TERM",
                 Style::default().fg(Color::Red),
                 format!("{} (slot {})", agent, slot),
-            ),
-            OrchestratorEventKind::Queued { id } => (
-                "QUEUE",
-                Style::default().fg(Color::Yellow),
-                format!("{} waiting for available agent", id),
             ),
             // dispatch-h62: orchestrator LLM events
             OrchestratorEventKind::OrchestratorText { text } => (
@@ -1885,24 +1459,6 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         .map(|a| a.display_name().to_string())
         .unwrap_or_else(|| format!("[{}]", target_g + 1));
 
-    // dispatch-xje: show merge conflict notice when present.
-    if !app.conflict_tasks.is_empty() {
-        let ids = app.conflict_tasks.join(", ");
-        let line = Line::from(vec![
-            Span::styled(
-                " MERGE CONFLICT: ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(ids, Style::default().fg(Color::Yellow)),
-            Span::styled(
-                " -- resolve manually, then run: git worktree remove .dispatch/.worktrees/<id>",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-        f.render_widget(Paragraph::new(line), area);
-        return;
-    }
-
     let content = match app.mode {
         Mode::Command => {
             let view_indicator = match app.view_mode {
@@ -1976,7 +1532,6 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::raw("  k            Kill target agent")),
         Line::from(Span::raw("  R            Rename target agent")),
         Line::from(Span::raw("  S            Rescan repos (multi-repo mode)")),
-        Line::from(Span::raw("  t            Task list overlay")),
         Line::from(Span::raw("  h            Prompt history")),
         Line::from(Span::raw("  o            Toggle orchestrator view")),
         Line::from(Span::raw("  p            Toggle PSK visibility")),
@@ -2053,183 +1608,6 @@ fn render_connection_info_overlay(f: &mut Frame, area: Rect, app: &App) {
                 .title(" CONNECTION ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Green)),
-        ),
-        r,
-    );
-}
-
-fn render_task_list_overlay(f: &mut Frame, area: Rect, app: &App) {
-    // Full-screen overlay (dispatch-1lc.4)
-    let r = centered_rect(area.width.saturating_sub(2), area.height.saturating_sub(2), area);
-    f.render_widget(Clear, r);
-
-    let in_progress: Vec<&TaskEntry> = app
-        .task_list_data
-        .iter()
-        .filter(|t| t.status == "in_progress")
-        .collect();
-    let queued: Vec<&TaskEntry> = app
-        .task_list_data
-        .iter()
-        .filter(|t| t.status == "open")
-        .collect();
-    let completed: Vec<&TaskEntry> = app
-        .task_list_data
-        .iter()
-        .filter(|t| t.status == "closed")
-        .collect();
-
-    let total = app.task_list_data.len();
-    let done_count = completed.len();
-
-    // Inner width for truncating titles (subtract border + padding).
-    let inner_w = r.width.saturating_sub(4) as usize;
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    // Progress summary line.
-    lines.push(Line::default());
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("  Tasks: {}/{} complete", done_count, total),
-            Style::default().fg(Color::White),
-        ),
-        Span::styled(
-            format!(
-                "   {} active  {} queued  {} done",
-                in_progress.len(),
-                queued.len(),
-                done_count
-            ),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
-    lines.push(Line::default());
-
-    // IN PROGRESS section.
-    lines.push(Line::from(Span::styled(
-        "  IN PROGRESS",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )));
-    if in_progress.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "    (none)",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        for t in &in_progress {
-            let agent_str = t
-                .agent
-                .as_deref()
-                .map(|a| format!(" <- {}", a))
-                .unwrap_or_default();
-            let prefix = format!("  [~] {}  ", t.id);
-            let avail = inner_w.saturating_sub(prefix.len() + agent_str.len());
-            let title = if t.title.len() > avail && avail > 3 {
-                format!("{}...", &t.title[..avail - 3])
-            } else {
-                t.title.clone()
-            };
-            lines.push(Line::from(vec![
-                Span::styled("[~] ", Style::default().fg(Color::Yellow)),
-                Span::styled(
-                    format!("{}  ", t.id),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(title, Style::default().fg(Color::White)),
-                Span::styled(agent_str, Style::default().fg(Color::Cyan)),
-            ]));
-        }
-    }
-    lines.push(Line::default());
-
-    // QUEUED section.
-    lines.push(Line::from(Span::styled(
-        "  QUEUED",
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-    )));
-    if queued.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "    (none)",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        for t in &queued {
-            let dep_str = if t.deps.is_empty() {
-                String::new()
-            } else {
-                format!(" -> {}", t.deps.join(", "))
-            };
-            let prefix = format!("[ ] {}  ", t.id);
-            let avail = inner_w.saturating_sub(prefix.len() + dep_str.len());
-            let title = if t.title.len() > avail && avail > 3 {
-                format!("{}...", &t.title[..avail - 3])
-            } else {
-                t.title.clone()
-            };
-            lines.push(Line::from(vec![
-                Span::styled("[ ] ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{}  ", t.id),
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(title, Style::default().fg(Color::DarkGray)),
-                Span::styled(dep_str, Style::default().fg(Color::Red)),
-            ]));
-        }
-    }
-    lines.push(Line::default());
-
-    // COMPLETED section (most recent first, limited to avoid flooding).
-    lines.push(Line::from(Span::styled(
-        "  COMPLETED",
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-    )));
-    let max_completed = (r.height as usize).saturating_sub(lines.len() + 4);
-    let show_completed: Vec<&TaskEntry> = completed.iter().rev().take(max_completed).cloned().collect();
-    if show_completed.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "    (none)",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        for t in &show_completed {
-            let prefix = format!("[x] {}  ", t.id);
-            let avail = inner_w.saturating_sub(prefix.len());
-            let title = if t.title.len() > avail && avail > 3 {
-                format!("{}...", &t.title[..avail - 3])
-            } else {
-                t.title.clone()
-            };
-            lines.push(Line::from(vec![
-                Span::styled("[x] ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{}  ", t.id),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(title, Style::default().fg(Color::DarkGray)),
-            ]));
-        }
-        if done_count > max_completed {
-            lines.push(Line::from(Span::styled(
-                format!("    ... and {} more", done_count - max_completed),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-    }
-
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "  Press any key to close",
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    f.render_widget(
-        Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .title(" TASK LIST ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
         ),
         r,
     );
@@ -2476,8 +1854,6 @@ fn compute_pane_size(term_rows: u16, term_cols: u16) -> (u16, u16) {
     (rows, cols)
 }
 
-// ── tests for tasks.md parsing (dispatch-1lc.3) ──────────────────────────────
-
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
@@ -2528,8 +1904,6 @@ fn main() -> io::Result<()> {
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((160, 40));
     let (pane_rows, pane_cols) = compute_pane_size(term_rows, term_cols);
 
-    let completion_timeout = Duration::from_secs(cfg.beads.completion_timeout_secs as u64);
-
     // Resolve repo root and workspace mode (dispatch-xje, dispatch-sa1).
     let git_toplevel = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -2561,7 +1935,6 @@ fn main() -> io::Result<()> {
         pane_rows,
         pane_cols,
         cfg.tools.clone(),
-        completion_timeout,
         repo_root.clone(),
         workspace,
         cfg.terminal.scrollback_lines,
@@ -2586,19 +1959,6 @@ fn main() -> io::Result<()> {
         st.event_tx = Some(ws_event_tx);
     }
 
-    // Background thread: poll .dispatch/tasks.md for ready tasks (dispatch-1lc.3).
-    // dispatch-sa1: in multi-repo mode, poll all repos.
-    let (tasks_tx, tasks_rx) = mpsc::channel::<Vec<QueuedTask>>();
-    let poll_repos: Vec<String> = app.repo_list().iter().map(|s| s.to_string()).collect();
-    thread::spawn(move || loop {
-        let mut all_tasks = Vec::new();
-        for repo in &poll_repos {
-            all_tasks.extend(fetch_ready_tasks(repo));
-        }
-        let _ = tasks_tx.send(all_tasks);
-        thread::sleep(Duration::from_secs(TASK_POLL_SECS));
-    });
-
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -2608,157 +1968,22 @@ fn main() -> io::Result<()> {
     let mut quit_requested = false;
 
     'main: loop {
-        // Close any slots whose child exited naturally (dispatch-bgz.9, dispatch-xje).
+        // Close any slots whose child exited naturally.
         for i in 0..MAX_SLOTS {
             if let Some(s) = &app.slots[i] {
                 if s.child_exited.load(Ordering::Relaxed) {
                     let callsign = s.display_name().to_string();
-                    let task_id = s.task_id.clone();
-                    let worktree_path = s.worktree_path.clone();
-                    let slot_repo = s.repo_root.clone();
                     app.slots[i] = None;
-                    if let Some(id) = task_id {
-                        app.push_orch(OrchestratorEventKind::TaskComplete { id: id.clone(), agent: callsign.clone() });
-                        app.push_chat(&callsign, &format!("Task {} complete.", id));
-                        // dispatch-h62: notify orchestrator of completion so it can decide next steps.
-                        if let Some(orch) = &mut app.orchestrator {
-                            orch.send_message(&format!("[EVENT] TASK_COMPLETE agent={} task={}", callsign, id));
-                        }
-                        // dispatch-xje: merge worktree before closing; flag on conflict.
-                        if worktree_path.is_some() {
-                            if merge_worktree(&id, &slot_repo) {
-                                app.push_orch(OrchestratorEventKind::Merged { id: id.clone() });
-                                app.push_ticker(format!("TASK COMPLETE: {} merged {} — slot {} now standby", callsign, id, i + 1));
-                                app.push_chat("Dispatcher", &format!("Merged task/{} into main.", id));
-                            } else {
-                                app.push_orch(OrchestratorEventKind::MergeConflict { id: id.clone() });
-                                app.conflict_tasks.push(id.clone());
-                                app.push_ticker(format!("MERGE CONFLICT: {} in {} — resolve manually", id, callsign));
-                                app.push_chat("Dispatcher", &format!("Merge conflict on task/{}.", id));
-                                if let Some(orch) = &mut app.orchestrator {
-                                    orch.send_message(&format!("[EVENT] MERGE_CONFLICT task={}", id));
-                                }
-                            }
-                        } else {
-                            app.push_ticker(format!("TASK COMPLETE: {} closed {} — slot {} now standby", callsign, id, i + 1));
-                        }
-                        update_task_in_file(&slot_repo, &id, 'x', None);
-                        // Dispatch newly unblocked tasks after completion.
-                        dispatch_ready_tasks(&mut app);
-                    } else {
-                        app.push_ticker(format!("AGENT EXITED: {} (slot {}) — standby", callsign, i + 1));
-                        if let Some(orch) = &mut app.orchestrator {
-                            orch.send_message(&format!("[EVENT] AGENT_EXITED agent={} slot={}", callsign, i + 1));
-                        }
+                    app.push_ticker(format!("AGENT EXITED: {} (slot {}) — standby", callsign, i + 1));
+                    if let Some(orch) = &mut app.orchestrator {
+                        orch.send_message(&format!("[EVENT] AGENT_EXITED agent={} slot={}", callsign, i + 1));
                     }
                 }
-            }
-        }
-
-        // Idle agent pickup: detect task completion via idle prompt or inactivity
-        // timeout, then assign the next queued task (dispatch-1lc.2).
-        let now = Instant::now();
-        let mut completed: Vec<(usize, String)> = Vec::new();
-        for i in 0..MAX_SLOTS {
-            let slot = match app.slots[i].as_mut() {
-                Some(s) if s.task_id.is_some() => s,
-                _ => continue,
-            };
-
-            // Update screen hash to track last output time.
-            let hash = {
-                let parser = slot.screen.lock().unwrap();
-                compute_screen_hash(parser.screen())
-            };
-            if hash != slot.last_screen_hash {
-                slot.last_screen_hash = hash;
-                slot.last_output_at = now;
-                slot.idle_since = None;
-                // dispatch-ct2.4: snap back to bottom on new output
-                slot.scroll_offset = 0;
-            }
-
-            // Layer 1: idle prompt detection with 500ms debounce.
-            let idle_prompt = {
-                let parser = slot.screen.lock().unwrap();
-                is_idle_prompt(parser.screen(), &slot.tool)
-            };
-            if idle_prompt {
-                match slot.idle_since {
-                    None => slot.idle_since = Some(now),
-                    Some(t) if now.duration_since(t) >= Duration::from_millis(500) => {
-                        completed.push((i, slot.task_id.clone().unwrap()));
-                    }
-                    _ => {}
-                }
-            } else {
-                slot.idle_since = None;
-            }
-
-            // Layer 2: inactivity timeout.
-            if app.completion_timeout.as_secs() > 0
-                && now.duration_since(slot.last_output_at) >= app.completion_timeout
-                && slot.idle_since.is_none() // avoid double-completing
-                && !completed.iter().any(|(idx, _)| *idx == i)
-            {
-                completed.push((i, slot.task_id.clone().unwrap()));
-            }
-        }
-
-        for (i, task_id) in completed {
-            let agent_name = app.slots[i].as_ref().map(|s| s.display_name().to_string()).unwrap_or_default();
-            let slot_repo = app.slots[i].as_ref().map(|s| s.repo_root.clone()).unwrap_or_else(|| app.default_repo_root().to_string());
-            app.push_orch(OrchestratorEventKind::TaskComplete { id: task_id.clone(), agent: agent_name.clone() });
-            app.push_chat(&agent_name, &format!("Task {} complete.", task_id));
-            // dispatch-h62: notify orchestrator of idle-detected completion.
-            if let Some(orch) = &mut app.orchestrator {
-                orch.send_message(&format!("[EVENT] TASK_COMPLETE agent={} task={}", agent_name, task_id));
-            }
-            if let Some(slot) = app.slots[i].as_mut() {
-                slot.task_id = None;
-                slot.idle_since = None;
-            }
-            update_task_in_file(&slot_repo, &task_id, 'x', None);
-
-            // Dispatch newly unblocked tasks after completion.
-            dispatch_ready_tasks(&mut app);
-
-            // Pick up next available queued task and assign it to the idle slot.
-            let next = fetch_ready_tasks(&slot_repo).into_iter().next();
-            if let Some(qt) = next {
-                let mut assigned = false;
-                let mut assigned_callsign = String::new();
-                if let Some(slot) = app.slots[i].as_mut() {
-                    let callsign = slot.callsign.clone();
-                    if update_task_in_file(&slot_repo, &qt.id, '~', Some(&callsign)) {
-                        let prompt = format!("[Dispatch task {}] {}\r", qt.id, qt.title);
-                        let _ = slot.writer.write_all(prompt.as_bytes());
-                        let _ = slot.writer.flush();
-                        slot.task_id = Some(qt.id.clone());
-                        slot.last_output_at = Instant::now();
-                        assigned = true;
-                        assigned_callsign = callsign;
-                    }
-                }
-                if assigned {
-                    app.push_orch(OrchestratorEventKind::TaskAssigned { id: qt.id.clone(), agent: assigned_callsign, slot: i + 1 });
-                }
-                app.queued_tasks.retain(|t| t.id != qt.id);
             }
         }
 
         if quit_requested && app.active_count() == 0 {
             break;
-        }
-
-        while let Ok(tasks) = tasks_rx.try_recv() {
-            let prev_count = app.queued_tasks.len();
-            let new_count = tasks.len();
-            if new_count > prev_count {
-                let added = new_count - prev_count;
-                app.push_ticker(format!("TASKS: {} new task{} queued — {} total ready", added, if added == 1 { "" } else { "s" }, new_count));
-            }
-            app.queued_tasks = tasks;
         }
 
         // Advance ticker animation each frame (dispatch-ami).
@@ -2875,7 +2100,6 @@ fn main() -> io::Result<()> {
             match app.overlay {
                 Overlay::None => {}
                 Overlay::Help => render_help_overlay(f, full),
-                Overlay::TaskList => render_task_list_overlay(f, full, &app),
                 Overlay::ConnectionInfo => render_connection_info_overlay(f, full, &app),
                 Overlay::ConfirmQuit => render_confirm_overlay(
                     f, full, "QUIT", "Agents are running. Really quit?",
@@ -2954,7 +2178,7 @@ fn main() -> io::Result<()> {
                     Mode::Command => {
                         if app.overlay != Overlay::None {
                             match app.overlay {
-                                Overlay::Help | Overlay::TaskList | Overlay::ConnectionInfo => {
+                                Overlay::Help | Overlay::ConnectionInfo => {
                                     app.overlay = Overlay::None;
                                 }
 
@@ -2964,11 +2188,7 @@ fn main() -> io::Result<()> {
                                             break 'main;
                                         }
                                         for i in 0..MAX_SLOTS {
-                                            let slot_repo = app.slots[i].as_ref().map(|s| s.repo_root.clone());
-                                            if let Some(task_id) = terminate_slot(&mut app.slots[i]) {
-                                                let repo = slot_repo.unwrap_or_else(|| app.default_repo_root().to_string());
-                                                update_task_in_file(&repo, &task_id, ' ', None);
-                                            }
+                                            terminate_slot(&mut app.slots[i]);
                                         }
                                         // dispatch-h62: kill orchestrator on quit.
                                         if let Some(orch) = &mut app.orchestrator {
@@ -2984,14 +2204,11 @@ fn main() -> io::Result<()> {
                                     KeyCode::Char('y') | KeyCode::Char('Y') => {
                                         let target_g = app.target_global();
                                         let callsign = app.slots[target_g].as_ref().map(|s| s.display_name().to_string()).unwrap_or_default();
-                                        let slot_repo = app.slots[target_g].as_ref().map(|s| s.repo_root.clone()).unwrap_or_else(|| app.default_repo_root().to_string());
                                         if !callsign.is_empty() {
                                             app.push_orch(OrchestratorEventKind::Terminated { agent: callsign.clone(), slot: target_g + 1 });
                                         }
-                                        if let Some(task_id) = terminate_slot(&mut app.slots[target_g]) {
-                                            update_task_in_file(&slot_repo, &task_id, ' ', None);
-                                            app.push_ticker(format!("TERMINATED: {} (slot {}) — task {} reopened", callsign, target_g + 1, task_id));
-                                        } else if !callsign.is_empty() {
+                                        terminate_slot(&mut app.slots[target_g]);
+                                        if !callsign.is_empty() {
                                             app.push_ticker(format!("TERMINATED: {} (slot {})", callsign, target_g + 1));
                                         }
                                         app.overlay = Overlay::None;
@@ -3271,14 +2488,6 @@ fn main() -> io::Result<()> {
                                     }
                                 }
 
-                                KeyCode::Char('t') => {
-                                    // dispatch-sa1: aggregate tasks from all repos in multi-repo mode.
-                                    app.task_list_data = Vec::new();
-                                    for repo in &app.repo_list().iter().map(|s| s.to_string()).collect::<Vec<_>>() {
-                                        app.task_list_data.extend(fetch_task_list_from_file(repo, &app.slots));
-                                    }
-                                    app.overlay = Overlay::TaskList;
-                                }
                                 // Prompt history overlay (dispatch-ct2.8)
                                 KeyCode::Char('h') => {
                                     app.history_scroll = 0;

@@ -2,14 +2,14 @@
 
 > Voice-powered command center for AI coding agents.
 
-Turn your Android phone into a push-to-talk radio that dispatches tasks to AI coding agents. The PC-side TUI gives you a live quad-pane view of embedded agent terminals. Voice a big task and the orchestrator breaks it into subtasks, dispatches agents into isolated git worktrees, and merges results back -- all tracked in a simple markdown file (`.dispatch/tasks.md`).
+Turn your Android phone into a push-to-talk radio that dispatches AI coding agents. The PC-side TUI gives you a live quad-pane view of embedded agent terminals. Voice a prompt and the orchestrator dispatches agents into isolated git worktrees. Agents do their work and push when done.
 
 ## Overview
 
 The system has two components:
 
 1. **Dispatch Radio** (Android) -- a minimal push-to-talk app controlled via hardware volume buttons. Transcribes speech and sends raw transcripts over a local WebSocket connection to the console's orchestrator.
-2. **Dispatch Console** (PC) -- a TUI command center with up to 26 embedded terminal panes (displayed 4 at a time in a 2x2 grid across pages), each running a live AI agent session. A persistent LLM orchestrator receives voice transcripts and decides what to do -- dispatch agents, decompose complex tasks, merge completed work, etc. Supports direct keyboard input into any agent pane via a vim-style modal interface.
+2. **Dispatch Console** (PC) -- a TUI command center with up to 26 embedded terminal panes (displayed 4 at a time in a 2x2 grid across pages), each running a live AI agent session. A persistent LLM orchestrator receives voice transcripts and decides what to do -- dispatch agents, send messages, merge completed work, etc. Supports direct keyboard input into any agent pane via a vim-style modal interface.
 
 Both components live in a single monorepo.
 
@@ -47,8 +47,7 @@ dispatch/
 ```
 sample-repo/
   .dispatch/
-    tasks.md           # Live task plan (read/written by the console)
-    .worktrees/        # Git worktrees for active tasks
+    .worktrees/        # Git worktrees for active agents
   (repo's own files)
 ```
 
@@ -82,7 +81,7 @@ Callsigns are the primary identifier for voice commands. All agents are addressa
 
 ## Voice Commands
 
-The radio sends raw voice transcripts to the console without any local parsing. The console's persistent LLM orchestrator (see `docs/ORCHESTRATOR.md`) receives these transcripts and decides what to do -- dispatch agents, send messages, terminate agents, merge tasks, etc.
+The radio sends raw voice transcripts to the console without any local parsing. The console's persistent LLM orchestrator (see `docs/ORCHESTRATOR.md`) receives these transcripts and decides what to do -- dispatch agents, send messages, terminate agents, merge worktrees, etc.
 
 ### How It Works
 
@@ -102,70 +101,27 @@ The radio sends raw voice transcripts to the console without any local parsing. 
 | "terminate bravo"                              | `terminate` agent=Bravo                      |
 | "what agents are running"                      | `list_agents`                                |
 | "refactor the auth system"                     | Decompose and `dispatch` multiple agents     |
-| "merge alpha's work"                           | `merge` task                                 |
+| "merge alpha's work"                           | `merge` agent worktree                       |
 
 The orchestrator understands natural language -- there are no fixed command patterns. It uses the full context of the conversation (agent states, prior tool results, etc.) to decide the best action.
 
 ---
 
-## Task Management
+## Agent Dispatch
 
-Tasks are tracked in `.dispatch/tasks.md` at the repo root. The orchestrator handles all task lifecycle: decomposition, dispatch, and completion. Each agent works in an isolated git worktree. No external tooling required.
-
-### Task Format
-
-```markdown
-# Refactor auth system
-
-- [ ] t1: Extract auth middleware into separate module
-  - [ ] t1.1: Create auth module skeleton
-  - [ ] t1.2: Move JWT validation logic -> t1.1
-  - [ ] t1.3: Update imports across codebase -> t1.1, t1.2
-- [ ] t2: Add OAuth2 support -> t1
-- [ ] t3: Write integration tests -> t2
-```
-
-**Status markers:** `[ ]` open, `[~]` in progress (with agent annotation), `[x]` done.
-
-**Dependencies:** `-> t1.1, t1.2` means "blocked by t1.1 and t1.2". No arrow means no blockers. Indentation is for readability; the `->` arrow is what encodes dependencies.
-
-**Agent annotation:** when a task is assigned, the console appends `| agent: Callsign`:
-
-```
-- [~] t1.1: Create auth module skeleton | agent: Alpha
-```
-
-### Task Decomposition
-
-When a voice prompt describes a complex task (e.g. "refactor the auth system"), the orchestrator decomposes it directly:
-
-1. **Analysis**: the orchestrator identifies the distinct pieces of work and their dependencies.
-2. **Plan output**: the orchestrator writes the task breakdown to `.dispatch/tasks.md` with IDs, descriptions, and dependency arrows.
-3. **Dispatch begins**: the orchestrator calls `dispatch` for each independent (unblocked) task, running them in parallel.
-4. **Sequencing**: as `TASK_COMPLETE` events arrive, the orchestrator dispatches dependent tasks that are now unblocked.
-For simple one-off prompts (e.g. "Alpha, fix this typo"), the orchestrator calls `dispatch` directly without decomposition. See [ORCHESTRATOR.md](ORCHESTRATOR.md) for the full decision-making logic.
+The orchestrator sends prompts to agents, and agents do their work in their own worktrees and push when done. Each agent works in an isolated git worktree to prevent agents from stepping on each other.
 
 ### Git Worktrees
 
-Each task runs in an isolated git worktree to prevent agents from stepping on each other.
-
-**On task assignment:**
+**On agent dispatch:**
 
 ```
-git worktree add .dispatch/.worktrees/{task_id} -b task/{task_id}
+git worktree add .dispatch/.worktrees/{agent_id} -b task/{agent_id}
 ```
 
 The agent's PTY is launched with its working directory set to the worktree path. The agent sees a normal git repo and works as usual.
 
-**On task completion:**
-
-1. The console merges the task branch back to the main branch.
-2. If the merge succeeds, the worktree is cleaned up: `git worktree remove .dispatch/.worktrees/{task_id}`.
-3. If the merge has conflicts, the console flags it on the ticker and leaves the worktree intact for manual review.
-
-**On agent termination:**
-
-If an agent is terminated before completing its task, the worktree and branch are preserved. The task is marked `[ ]` (open) so it can be picked up later -- the next agent assigned to it reuses the existing worktree.
+**Merging:** the orchestrator can call `merge` to merge an agent's worktree branch back into the main branch. If the merge succeeds, the worktree is cleaned up. If there are conflicts, the ticker flags it and the worktree is preserved for manual review.
 
 The `.dispatch/` directory is gitignored.
 
@@ -180,52 +136,10 @@ Dispatch supports two workspace modes:
 In multi-repo mode:
 
 - Pressing `n` opens a repo selector overlay instead of dispatching immediately. The user picks which repo to target.
-- Each agent slot tracks its own `repo_root`. Task and worktree operations use the slot's repo, not a global root.
-- The task list overlay (`t`) aggregates tasks from all detected repos.
+- Each agent slot tracks its own `repo_root`. Worktree operations use the slot's repo, not a global root.
 - Pressing `S` rescans child directories for new or removed repos.
 - The header bar shows the repo count.
 - Auto-startup (dispatching Alpha on launch) is skipped; the user must select a repo first.
-
-### Task Lifecycle
-
-**Complex task (decomposition flow):**
-
-```
-Voice: "refactor the auth system"
-  -> Orchestrator analyzes task, writes breakdown to .dispatch/tasks.md
-  -> Ticker: "Decomposing: refactor the auth system..."
-  -> Dispatches agents into worktrees for unblocked tasks
-  -> On completion: merge, mark [x], check what's unblocked
-  -> Dispatches next ready tasks
-  -> Repeat until all tasks are done
-```
-
-**Simple prompt (direct flow):**
-
-```
-Voice: "Alpha, fix the login bug"
-  -> Console creates single task in .dispatch/tasks.md
-  -> Creates worktree, assigns to Alpha
-  -> Alpha works in worktree
-  -> On completion: merge, mark [x], clean up
-```
-
-**Prompt delivery:** the prompt text is sent to the agent's terminal, prefixed with a context line:
-
-```
-[task t1.2] Move JWT validation logic to the new auth module
-```
-
-### Auto-Dispatch
-
-When a prompt arrives without a specified agent:
-
-1. The orchestrator creates a task (or decomposes it into subtasks if the task is complex).
-2. It checks agent states:
-   - If an idle agent exists, assign the task to it.
-   - If all agents are busy and an empty slot exists, dispatch a new agent (default tool: `claude-code`) and assign the task.
-   - If all slots are full and all agents are busy, add the task as `[ ]` (open/queued) and notify the radio: "All agents busy, task queued."
-3. Queued tasks are picked up automatically when an agent becomes idle. The console scans `.dispatch/tasks.md` for `[ ]` tasks with no unresolved `->` dependencies.
 
 ### Orchestrator Tool Interface
 
@@ -245,52 +159,14 @@ The console parses the `"action"` field to determine which tool to execute. Para
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
-| `dispatch` | `repo`, `prompt` | Create a task, set up a git worktree, and dispatch an agent. Returns slot, callsign, and task ID. |
-| `terminate` | `agent` | Kill an agent by callsign or slot number. Frees the slot and reopens the task for reassignment. |
-| `merge` | `task_id` | Merge a task's worktree branch into main. Returns success/failure with conflict details. |
-| `list_agents` | _(none)_ | List all active agent slots with callsign, tool, busy/idle status, current task, and repo. |
+| `dispatch` | `repo`, `prompt` | Set up a git worktree and dispatch an agent with the given prompt. Returns slot, callsign, and agent ID. |
+| `terminate` | `agent` | Kill an agent by callsign or slot number. Frees the slot. |
+| `merge` | `task_id` | Merge an agent's worktree branch into main. Returns success/failure with conflict details. |
+| `list_agents` | _(none)_ | List all active agent slots with callsign, tool, status, and repo. |
 | `list_repos` | _(none)_ | List available repositories that agents can work in. |
 | `message_agent` | `agent`, `text` | Send text to an agent's terminal (PTY). Use for follow-up instructions or answering agent questions. |
 
 The `agent` parameter accepts either a callsign (e.g. "Alpha") or a slot number (e.g. "1"), case-insensitive.
-
-### Task Completion Detection
-
-Determining when an agent has finished a task is non-trivial. The console uses a two-layer strategy, evaluated in priority order:
-
-**Layer 1 -- Idle prompt detection (primary)**
-
-The console watches the virtual terminal screen (via the `vt100` parser) for idle prompt patterns that indicate the agent has returned to a ready state:
-
-| Tool        | Idle pattern                |
-|-------------|-----------------------------|
-| claude-code | `^> $` on last active row  |
-| gh copilot  | `What would you like help with?` or the prompt cursor `?` |
-| Shell       | Prompt ending in `$ ` or `# ` |
-
-The pattern match applies to the last non-blank row of the virtual screen. A match is confirmed only after no new output has arrived for 500ms, to avoid false positives during streaming output that briefly hits the idle-looking state.
-
-**Layer 2 -- Inactivity timeout (safety net)**
-
-If layer 1 does not fire within a configurable timeout after the last PTY output, the console marks the task complete. Default timeout: 60 seconds. Configurable in `config.toml`:
-
-```toml
-[tasks]
-completion_timeout_secs = 60  # 0 to disable
-```
-
-When this fires, the agent is marked idle and can receive new tasks. The pane briefly shows a "timed out" indicator.
-
-**State machine**
-
-Each agent slot tracks a `completion_state`:
-
-```
-Idle -> Busy (task assigned + prompt delivered)
-Busy -> Idle (layer 1 or 2 triggered -> merge worktree -> mark [x])
-```
-
-Only one completion event fires per task: whichever layer triggers first cancels the other.
 
 ### Ticker
 
@@ -298,37 +174,20 @@ A single-line LED-style scrolling marquee between the header bar and the quad pa
 
 **Message sources:**
 
-- Decomposition status: `Decomposing: breaking down "refactor auth" into 5 subtasks...`
-- Task events: `t1.1 complete, merging... t1.2 unblocked, dispatching to Bravo`
-- Merge results: `t1.1 merged to main` or `t1.3 merge conflict, needs manual review`
-- Errors: `All agents busy, task t4 queued`
+- Agent events: dispatches, terminations, exits.
+- Merge results: `agent-1 merged to main` or `agent-1 merge conflict, needs manual review`.
 
-**Rendering:** fixed-width viewport, text offset decremented each frame tick (e.g. every 50ms). Once a message scrolls fully off-screen, it is discarded and the next queued message begins. If multiple messages queue up during a burst (e.g. several tasks completing at once), they scroll sequentially with a small gap between them.
-
-### Task Visibility
-
-The console displays task state across multiple areas:
-
-- **Header bar**: total task progress (e.g. `Tasks: 3/7`) and queued count.
-- **Ticker**: real-time event stream (planning, dispatch, merges, errors).
-- **Pane info strip**: each pane shows its current task ID or "idle".
-- **Task list overlay** (`t` key): full view of all tasks with status, agent assignments, and dependencies.
-- **Orchestrator view** (`o` key): toggles the main area between the 2x2 agent grid and a scrollable orchestrator event log showing voice transcripts, reasoning decisions, and tool calls in real time.
+**Rendering:** fixed-width viewport, text offset decremented each frame tick (e.g. every 50ms). Once a message scrolls fully off-screen, it is discarded and the next queued message begins. If multiple messages queue up, they scroll sequentially with a small gap between them.
 
 ### Orchestrator View
 
 Pressing `o` in command mode replaces the 2x2 agent grid with a full-height scrollable log of orchestrator events. Each entry is timestamped and categorized:
 
 - **MIC**: incoming voice transcripts from the radio.
-- **DECOMPOSE**: task decomposition start, completion (with task count), or failure.
-- **TASK**: task creation in `.dispatch/tasks.md`.
-- **ASSIGN**: task assigned to an agent slot.
-- **DONE**: task completed (idle prompt detected or inactivity timeout).
 - **MERGE**: worktree merged to main.
 - **CONFLICT**: merge conflict detected.
 - **DISPATCH**: agent launched into a slot.
 - **TERM**: agent terminated.
-- **QUEUE**: task queued (all agents busy).
 
 Pressing `o` again returns to the agent grid. While in the orchestrator view, `Up`/`Down` and `PageUp`/`PageDown` scroll through history. The footer shows contextual hints for the active view mode.
 
@@ -391,17 +250,16 @@ The console generates a random PSK on first run and stores it in `~/.config/disp
 <- {
      "type": "agents",
      "slots": [
-       { "slot": 1, "callsign": "Alpha", "tool": "claude-code", "status": "busy", "task": "t-1" },
-       { "slot": 2, "callsign": "Bravo", "tool": "claude-code", "status": "idle", "task": null },
-       { "slot": 3, "callsign": "Charlie", "tool": "copilot", "status": "idle", "task": null },
-       { "slot": 4, "callsign": null, "tool": null, "status": "empty", "task": null }
+       { "slot": 1, "callsign": "Alpha", "tool": "claude-code", "status": "active" },
+       { "slot": 2, "callsign": "Bravo", "tool": "claude-code", "status": "active" },
+       { "slot": 3, "callsign": "Charlie", "tool": "copilot", "status": "active" },
+       { "slot": 4, "callsign": null, "tool": null, "status": "empty" }
      ],
-     "target": 1,
-     "queued_tasks": 0
+     "target": 1
    }
 ```
 
-Slots are numbered 1-26. Only active (dispatched) and empty slots on allocated pages are included. `task` is the current task ID if the agent is working on one.
+Slots are numbered 1-26. Only active (dispatched) and empty slots on allocated pages are included.
 
 **Set target**
 
@@ -414,23 +272,23 @@ Slots are numbered 1-26. Only active (dispatched) and empty slots on allocated p
 
 ```
 -> { "type": "send", "text": "refactor the auth module to use JWT" }
-<- { "type": "ack", "slot": 1, "callsign": "Alpha", "task": "t-1" }
+<- { "type": "ack", "slot": 1, "callsign": "Alpha" }
 ```
 
-Sent to the current target. The console creates a task, assigns it, and returns the task ID in the ack.
+Sent to the current target.
 
 **Send prompt to specific agent**
 
 ```
 -> { "type": "send", "text": "write unit tests", "slot": 3 }
-<- { "type": "ack", "slot": 3, "callsign": "Charlie", "task": "t-2" }
+<- { "type": "ack", "slot": 3, "callsign": "Charlie" }
 ```
 
 **Send prompt with auto-dispatch**
 
 ```
 -> { "type": "send", "text": "set up the CI pipeline", "auto": true }
-<- { "type": "ack", "slot": 2, "callsign": "Bravo", "task": "t-3", "auto_dispatched": false }
+<- { "type": "ack", "slot": 2, "callsign": "Bravo", "auto_dispatched": false }
 ```
 
 `auto: true` tells the console to pick the best agent. Response includes whether a new agent was auto-dispatched.
@@ -467,16 +325,16 @@ Sent to the current target. The console creates a task, assigns it, and returns 
 
 ```
 <- { "type": "chat", "sender": "Dispatcher", "text": "Dispatched agent Alpha." }
-<- { "type": "chat", "sender": "Alpha", "text": "Task t1 complete." }
+<- { "type": "chat", "sender": "Alpha", "text": "Work complete." }
 <- { "type": "chat", "sender": "You", "text": "refactor the auth module" }
 ```
 
-Pushed to all connected clients whenever the orchestrator produces text, agents complete tasks, or other significant events occur. Not a response to any request -- the console pushes these proactively. The `sender` field identifies who said it: `"You"` for voice transcripts, `"Dispatcher"` for orchestrator decisions, or an agent callsign (e.g. `"Alpha"`) for agent events.
+Pushed to all connected clients whenever the orchestrator produces text or other significant events occur. Not a response to any request -- the console pushes these proactively. The `sender` field identifies who said it: `"You"` for voice transcripts, `"Dispatcher"` for orchestrator decisions, or an agent callsign (e.g. `"Alpha"`) for agent events.
 
 **Error**
 
 ```
-<- { "type": "error", "message": "all slots full and busy, task queued as t-7" }
+<- { "type": "error", "message": "all slots full, no available agents" }
 ```
 
 ### Design Notes
@@ -547,11 +405,11 @@ Pages are cycled with `Left` / `Right` arrow keys. The header shows the current 
 
 ```
 ┌─ DISPATCH ──────────────────────────────────────────────────────────┐
-│ RADIO: ● CONNECTED   PSK: a7f3...  Tasks: 3/7  PAGE 1/2    14:32 │
-│ ◄◄ t1.1 complete, merging... t1.2 unblocked, dispatching to Bravo │
+│ RADIO: ● CONNECTED   PSK: a7f3...  PAGE 1/2                14:32 │
+│ ◄◄ DISPATCH: agent-1 -> ALPHA (slot 1)                            │
 ├────────────────────────────────┬────────────────────────────────────┤
 │ ▸ [1] ALPHA                    │ [2] BRAVO                         │
-│   CLAUDE-CODE | t1.1           │ CLAUDE-CODE | t1.2                │
+│   CLAUDE-CODE | my-repo        │ CLAUDE-CODE | my-repo             │
 │   dispatched 14:20 | 12m03s   │ dispatched 14:28 | 4m11s          │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  │
 │ ~/project$ claude              │ ~/project$ claude                  │
@@ -564,14 +422,14 @@ Pages are cycled with `Left` / `Right` arrow keys. The header shows the current 
 │                                │                                    │
 ├────────────────────────────────┼────────────────────────────────────┤
 │ [3] CHARLIE                    │ [4] DELTA                         │
-│ COPILOT | idle                 │ CLAUDE-CODE | t1.3                │
+│ CLAUDE-CODE | my-repo          │ CLAUDE-CODE | my-repo             │
 │ dispatched 14:15 | 17m12s     │ dispatched 14:30 | 2m04s          │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  │
-│ ~/project$ gh copilot suggest  │ ~/project$ claude                  │
+│ ~/project$ claude              │ ~/project$ claude                  │
 │                                │                                    │
-│ ? What would you like help     │ > Setting up the CI pipeline...   │
-│   with?                        │                                    │
-│ █                              │                                    │
+│ > Setting up the CI pipeline   │ > Analyzing the database schema   │
+│   ...                          │   for migration...                │
+│                                │                                    │
 │                                │                                    │
 │                                │                                    │
 ├────────────────────────────────┴────────────────────────────────────┤
@@ -583,11 +441,11 @@ Page 2 of the same session:
 
 ```
 ┌─ DISPATCH ──────────────────────────────────────────────────────────┐
-│ RADIO: ● CONNECTED   PSK: a7f3...  Tasks: 3/7  PAGE 2/2    14:32 │
-│ ◄◄ t2 merged to main                                              │
+│ RADIO: ● CONNECTED   PSK: a7f3...  PAGE 2/2                14:32 │
+│ ◄◄ MERGED: task/agent-5                                           │
 ├────────────────────────────────┬────────────────────────────────────┤
 │ [5] ECHO                       │ [6] FOXTROT                       │
-│ CLAUDE-CODE | t2.1             │ CLAUDE-CODE | t2.2                │
+│ CLAUDE-CODE | my-repo          │ CLAUDE-CODE | my-repo             │
 │ dispatched 14:31 | 1m22s      │ dispatched 14:32 | 0m15s          │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  │
 │ ~/project$ claude              │ ~/project$ claude                  │
@@ -601,10 +459,10 @@ Page 2 of the same session:
 ├────────────────────────────────┼────────────────────────────────────┤
 │ [7] ── STANDBY ──              │ [8] ── STANDBY ──                 │
 │                                │                                    │
-│  Dispatch new agent:           │  Queued tasks: 2                  │
+│  Dispatch new agent:           │  Dispatch new agent:              │
 │                                │                                    │
-│  [c] claude-code               │  t3  "Write integration tests"    │
-│  [g] gh copilot                │  t4  "Fix CORS headers"           │
+│  [c] claude-code               │  [c] claude-code                  │
+│  [g] gh copilot                │  [g] gh copilot                   │
 │                                │                                    │
 │                                │                                    │
 │                                │                                    │
@@ -621,11 +479,11 @@ Page 2 of the same session:
 
 ```
 ┌─ DISPATCH ──────────────────────────────────────────────────────────┐
-│ RADIO: ● CONNECTED   PSK: a7f3...  Tasks: 3/7  PAGE 1/2    14:32 │
-│ ◄◄ t1.3 merged to main                                            │
+│ RADIO: ● CONNECTED   PSK: a7f3...  PAGE 1/2                14:32 │
+│ ◄◄ MERGED: task/agent-3                                           │
 ├────────────────────────────────┬────────────────────────────────────┤
 │ ┃ [1] ALPHA                    │ [2] BRAVO                         │
-│ ┃ CLAUDE-CODE | t1.1           │ ...                                │
+│ ┃ CLAUDE-CODE | my-repo        │ ...                                │
 │ ┃ dispatched 14:20 | 12m03s   │                                    │
 │ ┃┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄   │                                    │
 │ ┃~/project$ claude             │                                    │
@@ -645,12 +503,12 @@ Bright green border on the active pane. Footer shows mode indicator.
 
 **Regions:**
 
-1. **Header bar** -- radio connection state, PSK (truncated), task progress (done/total), current page indicator, clock.
-2. **Ticker** -- single-line LED-style scrolling marquee. Shows decomposition status, task events, merge results, and errors. Text scrolls right-to-left. Blank when idle. See [Ticker](#ticker).
+1. **Header bar** -- radio connection state, PSK (truncated), current page indicator, clock.
+2. **Ticker** -- single-line LED-style scrolling marquee. Shows agent events, merge results, and errors. Text scrolls right-to-left. Blank when idle. See [Ticker](#ticker).
 3. **Quad pane** -- four slots from the current page. Targeted pane has `▸` marker and cyan border (command mode) or green border (input mode). Each pane has:
-   - **Info strip**: callsign, tool type, current task ID (or "idle"), dispatch time, and runtime.
+   - **Info strip**: callsign, tool type, repo name, dispatch time, and runtime.
    - **Terminal area**: live embedded terminal output rendered from the VTE parser.
-   - Empty slots show "STANDBY" with dispatch shortcuts. The last STANDBY slot on the last page also shows queued task count and titles.
+   - Empty slots show "STANDBY" with dispatch shortcuts.
 4. **Footer bar** -- command mode: radio state, target (regardless of page), page navigation, shortcuts. Input mode: `-- INPUT ({CALLSIGN}) --` with ESC hint.
 
 ### Input Model
@@ -685,7 +543,6 @@ While in input mode, `Escape` is the only key intercepted by the console -- it i
 | `k`               | Kill agent in currently targeted slot (confirms first)       |
 | `R`               | Rename agent in currently targeted slot                      |
 | `S`               | Rescan repos (multi-repo mode only)                          |
-| `t`               | Show task list overlay (plan, active, queued, completed)             |
 | `h`               | Show prompt history overlay (browse and re-send past prompts) |
 | `o`               | Toggle orchestrator view (replaces agent grid with event log) |
 | `p`               | Show/hide full PSK                                           |
@@ -740,7 +597,7 @@ These ANSI sequences are universal -- they're written to the PTY, not the host t
 
 **Prompt injection (from voice or auto-dispatch):**
 
-When a prompt arrives from the radio (or from task auto-dispatch), it is written to the PTY as if typed, followed by `\r` (Enter). This happens regardless of the console's current input mode.
+When a prompt arrives from the radio, it is written to the PTY as if typed, followed by `\r` (Enter). This happens regardless of the console's current input mode.
 
 ```rust
 writer.write_all(format!("{}\r", prompt_text).as_bytes())?;
@@ -774,7 +631,7 @@ if let Some(deadline) = resize_deadline {
 
 **Agent termination:**
 
-The child process is killed, the PTY is closed, and the slot is marked empty. Any active task for that agent is updated to `[ ]` (open/unassigned) in `.dispatch/tasks.md` so it can be picked up later. The worktree and branch are preserved for the next agent.
+The child process is killed, the PTY is closed, and the slot is marked empty.
 
 ### Configuration
 
@@ -799,18 +656,6 @@ psk = "a7f3e9b1c4d8..."
 scrollback_lines = 1000
 # Maximum concurrent agents. 4-26, in multiples of 4 (one page per 4 agents).
 max_agents = 8
-
-[tasks]
-# Base directory for dispatch artifacts in the target repo (tasks.md, .worktrees/).
-dir = ".dispatch"
-# Auto-dispatch agents for unaddressed prompts.
-auto_dispatch = true
-# Default tool for auto-dispatched agents.
-default_tool = "claude-code"
-# Inactivity timeout for task completion detection (seconds). 0 to disable.
-completion_timeout_secs = 60
-# Auto-merge completed task branches to main. If false, branches are left for manual review.
-auto_merge = true
 
 [tools]
 claude-code = "claude"
@@ -874,7 +719,7 @@ Minimal, high-contrast, dark theme. Uppercase labels, monospaced accents.
 │                             │
 │  TARGET                     │
 │  [1] ALPHA                  │  <- callsign, large
-│  CLAUDE-CODE | t-1          │  <- tool + active task
+│  CLAUDE-CODE | my-repo      │  <- tool + repo
 │                             │
 │  ┌───────────────────────┐  │
 │  │   ◉ LISTENING          │  │
@@ -887,14 +732,11 @@ Minimal, high-contrast, dark theme. Uppercase labels, monospaced accents.
 │    Alpha.                   │
 │  Dispatcher: Dispatched     │
 │    agent Alpha.             │
-│  Alpha: Task t1 complete.   │
-│  Dispatcher: Merged task/t1 │
-│    into main.               │
+│  Dispatcher: Merged         │
+│    task/agent-1 into main.  │
 │                             │
 │  AGENTS                     │
 │  ▸α  β  χ  δ  ε  φ        │  <- scrollable, initials for all active agents
-│                             │
-│  QUEUED: 2                  │
 │                             │
 └─────────────────────────────┘
 ```
