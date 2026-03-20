@@ -163,6 +163,8 @@ pub struct App {
     pub pending_voice: Vec<String>,
     // Broadcast channel for pushing chat messages to radio clients
     pub chat_tx: tokio::sync::broadcast::Sender<String>,
+    // Sender for agent chat messages (cloned into each PTY reader thread)
+    pub agent_msg_tx: std::sync::mpsc::Sender<(usize, String)>,
     // Status indicator blink frame counter (pulsing REC-light effect)
     pub status_blink_frame: u16,
 }
