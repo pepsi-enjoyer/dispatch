@@ -1,18 +1,11 @@
 # Dispatch runtime artifacts (created in target repos)
 .dispatch/
 
-# Beads issue tracker (local only)
-.beads/
-
-# Obelisk orchestrator
-.obelisk/
-obelisk.toml
-
-# Dolt database files
+# Dolt database files (legacy)
 .dolt/
+.doltcfg/
 dolt/
 dolt-server.*
-config.yaml
 *.db
 
 # Claude Code

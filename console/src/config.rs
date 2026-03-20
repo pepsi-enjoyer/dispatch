@@ -21,16 +21,10 @@ pub struct TerminalConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct BeadsConfig {
-    pub project_dir: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     pub auth: AuthConfig,
     pub terminal: TerminalConfig,
-    pub beads: BeadsConfig,
     pub tools: HashMap<String, String>,
 }
 
@@ -50,9 +44,6 @@ impl Default for Config {
             terminal: TerminalConfig {
                 scrollback_lines: 1000,
                 max_agents: 8,
-            },
-            beads: BeadsConfig {
-                project_dir: ".".to_string(),
             },
             tools,
         }
@@ -189,10 +180,6 @@ fn to_toml_with_comments(cfg: &Config) -> String {
          # Maximum concurrent agents. 4-26, in multiples of 4 (one page per 4 agents).\n\
          max_agents = {max_agents}\n\
          \n\
-         [beads]\n\
-         # Working directory for bd commands. Defaults to cwd.\n\
-         project_dir = \"{project_dir}\"\n\
-         \n\
          [tools]\n\
          {tools}",
         port = cfg.server.port,
@@ -200,7 +187,6 @@ fn to_toml_with_comments(cfg: &Config) -> String {
         psk = cfg.auth.psk,
         scrollback = cfg.terminal.scrollback_lines,
         max_agents = cfg.terminal.max_agents,
-        project_dir = cfg.beads.project_dir,
         tools = tools_lines,
     )
 }

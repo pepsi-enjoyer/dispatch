@@ -160,7 +160,7 @@ pub fn kill_child_pid(pid: u32) {
     }
 }
 
-/// Terminate a slot: kill child, clear slot, return task_id for beads reopen.
+/// Terminate a slot: kill child, clear slot, return task_id.
 pub fn terminate_slot(slot: &mut Option<SlotState>) -> Option<String> {
     if let Some(s) = slot.as_ref() {
         if let Some(pid) = s.child_pid {
