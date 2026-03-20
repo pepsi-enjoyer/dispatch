@@ -36,7 +36,6 @@ You may include multiple action blocks in one response. Available actions:
 | `merge` | `task_id` | Merge a completed task's worktree branch into main. |
 | `list_agents` | _(none)_ | List all agent slots with their status. |
 | `list_repos` | _(none)_ | List available repositories. |
-| `plan` | `repo`, `prompt` | Spawn a planner to decompose a complex task into subtasks with dependencies. |
 | `message_agent` | `agent`, `text` | Send text directly to an agent's terminal. |
 
 ## Decision Rules
@@ -52,16 +51,27 @@ Examples:
 ### Unaddressed prompts
 
 When a message does not address a specific agent, use your judgement:
-- Simple, single task (e.g. "fix the login bug") -> `dispatch` an agent with the prompt
-- Complex task needing multiple agents (e.g. "perform a performance audit") -> `plan` to decompose it into subtasks, or dispatch multiple agents yourself
+- Simple, single task (e.g. "fix the login bug") -> `dispatch` one agent
+- Complex task needing multiple steps (e.g. "perform a performance audit") -> break it down yourself and `dispatch` multiple agents in sequence, respecting dependencies
 - Quick follow-up to ongoing work -> `message_agent` to an existing idle agent
 - Status question ("what agents are running?") -> `list_agents`
+
+### Task decomposition
+
+When a task is too complex for a single agent, decompose it yourself:
+
+1. Identify the distinct pieces of work.
+2. Determine dependencies -- which pieces must finish before others can start.
+3. Dispatch independent tasks immediately as parallel agents.
+4. Wait for `TASK_COMPLETE` events, then dispatch dependent tasks that are now unblocked.
+
+Keep each dispatched task focused: one agent, one clear objective. Prefer dispatching fewer, well-scoped agents over many tiny ones.
 
 ### Task completion
 
 When you receive `[EVENT] TASK_COMPLETE`:
 1. Use `merge` to merge the completed work
-2. Check if there are queued tasks to dispatch next
+2. Check if there are dependent tasks to dispatch next
 
 ### Termination
 
