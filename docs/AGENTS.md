@@ -1,20 +1,31 @@
 # Agent Instructions
 
-You are a dispatch worker agent. You have been assigned a task and are running inside a git worktree isolated from other agents.
+You are a dispatch worker agent. You have been assigned a task and should work in an isolated git worktree.
 
 ## Your Environment
 
-- You are working in a git worktree at `.dispatch/.worktrees/{task_id}/` on branch `task/{task_id}`.
+- Your prompt includes your task ID (e.g. `t1`). Use it to name your worktree and branch.
 - Other agents are working in parallel on their own worktrees. You will not conflict with them.
-- The console manages task tracking, merging, and dispatch. You do not need to update any tracking files.
-- When you are done, simply finish your work and return to the prompt. The console detects completion automatically.
+- The console manages task tracking and dispatch. You do not need to update any tracking files.
 
 ## Workflow
 
 1. Read the task prompt delivered to your terminal.
-2. Do the work on your worktree branch.
-3. Commit your changes with clear commit messages.
-4. Return to the prompt when done. The console will merge your branch to main.
+2. Create your worktree and switch into it:
+   ```bash
+   git worktree add .dispatch/.worktrees/{task_id} -b task/{task_id} HEAD
+   cd .dispatch/.worktrees/{task_id}
+   ```
+3. Do the work on your worktree branch.
+4. Commit your changes with clear commit messages.
+5. Merge your branch into main and clean up:
+   ```bash
+   cd "$(git rev-parse --path-format=absolute --git-common-dir)/.."
+   git merge task/{task_id} --no-ff -m "merge task/{task_id}"
+   git worktree remove .dispatch/.worktrees/{task_id} --force
+   git branch -d task/{task_id}
+   ```
+6. Return to the prompt when done.
 
 ## Non-Interactive Shell Commands
 
@@ -35,19 +46,19 @@ rm -rf directory            # NOT: rm -r directory
 
 ## Completion
 
-Your task is not done until your worktree is clean and you have returned to the prompt. The console detects completion by watching for an idle prompt, then merges your branch to main automatically.
+Your task is not done until you have merged your branch into main and cleaned up your worktree.
 
 Before finishing:
 
 1. **Commit all changes.** Run `git status` and ensure there are no unstaged or untracked files. Everything you want merged must be committed.
-2. **Verify a clean worktree.** `git status` should report `nothing to commit, working tree clean`. Uncommitted changes will be lost when the console removes the worktree after merging.
-3. **Return to the prompt.** The console's completion detector watches for an idle prompt pattern. Once it sees you are idle, it triggers the merge. Do not leave a command running or output streaming -- just stop and wait at the prompt.
+2. **Merge into main.** Navigate back to the repo root, merge your branch, remove the worktree, and delete the branch (see workflow above).
+3. **Return to the prompt.** The console's completion detector watches for an idle prompt pattern. Once it sees you are idle, it triggers the next dispatch. Do not leave a command running or output streaming -- just stop and wait at the prompt.
 
-If the merge fails due to conflicts, the console automatically dispatches a resolution agent into your worktree to rebase onto main and resolve the conflicts. If resolution also fails, the console flags it on the ticker for manual review.
+If the merge fails due to conflicts, stop and return to the prompt. The console flags the conflict for manual review.
 
 ## Rules
 
 - Do NOT modify `.dispatch/tasks.md` -- the console manages it.
-- Do NOT switch branches or create worktrees -- you are already in one.
-- Do NOT push to remote -- the console handles merging after you finish.
-- Commit all changes and ensure a clean worktree before returning to the prompt.
+- Do NOT push to remote -- merging into main locally is sufficient.
+- Create your own worktree at the start and clean it up at the end.
+- Commit all changes before merging.
