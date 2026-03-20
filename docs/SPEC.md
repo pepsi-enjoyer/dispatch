@@ -37,7 +37,7 @@ dispatch/
   docs/
     SPEC.md            # Full system specification
     ARCHITECTURE.md    # High-level architecture overview
-    ORCHESTRATOR.md    # Orchestrator behavior and tool reference
+    ORCHESTRATOR.md    # Orchestrator behavior and action reference
     AGENTS.md          # Template injected into agent prompts
   README.md
 ```
@@ -469,6 +469,16 @@ Sent to the current target. The console creates a task, assigns it, and returns 
 -> { "type": "radio_status", "state": "idle" }
 ```
 
+**Chat (server push)**
+
+```
+<- { "type": "chat", "sender": "Dispatcher", "text": "Dispatched agent Alpha." }
+<- { "type": "chat", "sender": "Alpha", "text": "Task t1 complete." }
+<- { "type": "chat", "sender": "You", "text": "refactor the auth module" }
+```
+
+Pushed to all connected clients whenever the orchestrator produces text, agents complete tasks, or other significant events occur. Not a response to any request -- the console pushes these proactively. The `sender` field identifies who said it: `"You"` for voice transcripts, `"Dispatcher"` for orchestrator decisions, or an agent callsign (e.g. `"Alpha"`) for agent events.
+
 **Error**
 
 ```
@@ -481,6 +491,7 @@ Sent to the current target. The console creates a task, assigns it, and returns 
 - Unknown message types are silently ignored for forward compatibility.
 - Messages include an optional `seq` field for request-response correlation.
 - The radio re-requests `list_agents` on reconnect to sync state.
+- The `chat` message type is a server push -- it is sent without a corresponding request. The WebSocket server uses a broadcast channel to push chat messages to all connected clients simultaneously.
 
 ---
 
@@ -877,11 +888,15 @@ Minimal, high-contrast, dark theme. Uppercase labels, monospaced accents.
 │  │   ░░░░░███████░░░░░░  │  │
 │  └───────────────────────┘  │
 │                             │
-│  LAST DISPATCH              │
-│  -> ALPHA                   │
-│  "refactor the auth module  │
-│   to use JWT"               │
-│  task t-1                   │  <- task ID
+│  LOG                        │
+│  You: refactor the auth     │  <- scrollable chat log
+│  Dispatcher: Dispatching    │
+│    Alpha.                   │
+│  Dispatcher: Dispatched     │
+│    agent Alpha.             │
+│  Alpha: Task t1 complete.   │
+│  Dispatcher: Merged task/t1 │
+│    into main.               │
 │                             │
 │  AGENTS                     │
 │  ▸α  β  χ  δ  ε  φ        │  <- scrollable, initials for all active agents
