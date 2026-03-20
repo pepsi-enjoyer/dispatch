@@ -47,14 +47,11 @@ pub async fn run_server(state: SharedState, port: u16, psk: String, tls: TlsAcce
         tokio::spawn(async move {
             let tls_stream = match tls.accept(stream).await {
                 Ok(s) => s,
-                Err(e) => {
-                    eprintln!("ws: TLS handshake failed from {peer_addr}: {e}");
+                Err(_) => {
                     return;
                 }
             };
-            if let Err(e) = handle_connection(tls_stream, peer_addr, state, psk, chat_rx).await {
-                eprintln!("ws: connection error from {peer_addr}: {e}");
-            }
+            let _ = handle_connection(tls_stream, peer_addr, state, psk, chat_rx).await;
         });
     }
 }
@@ -94,11 +91,14 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
 
     let ws_stream = match result {
         Ok(ws) => ws,
-        Err(e) => {
+        Err(_) => {
             if !auth_ok {
-                eprintln!("ws: rejected {peer_addr}: invalid PSK");
-            } else {
-                eprintln!("ws: handshake error from {peer_addr}: {e}");
+                // Route through the TUI event channel instead of eprintln,
+                // which would corrupt the alternate-screen rendering.
+                let st = state.lock().unwrap();
+                if let Some(tx) = &st.event_tx {
+                    let _ = tx.send(WsEvent::InvalidPsk { addr: peer_addr.to_string() });
+                }
             }
             return Ok(());
         }

@@ -252,14 +252,20 @@ fn main() -> io::Result<()> {
 
         // Process events from the WebSocket thread (dispatch-1lc.1, dispatch-h62).
         while let Ok(event) = ws_event_rx.try_recv() {
-            let ws_server::WsEvent::VoiceTranscript { text } = event;
-            app.radio_state = RadioState::Connected;
-            app.push_orch(OrchestratorEventKind::VoiceTranscript { text: text.clone() });
-            app.push_chat("You", &text);
-            if let Some(orch) = &mut app.orchestrator {
-                orch.send_message(&format!("[MIC] {}", text));
-            } else {
-                app.pending_voice.push(text);
+            match event {
+                ws_server::WsEvent::VoiceTranscript { text } => {
+                    app.radio_state = RadioState::Connected;
+                    app.push_orch(OrchestratorEventKind::VoiceTranscript { text: text.clone() });
+                    app.push_chat("You", &text);
+                    if let Some(orch) = &mut app.orchestrator {
+                        orch.send_message(&format!("[MIC] {}", text));
+                    } else {
+                        app.pending_voice.push(text);
+                    }
+                }
+                ws_server::WsEvent::InvalidPsk { addr } => {
+                    app.push_ticker(format!("REJECTED: invalid PSK from {}", addr));
+                }
             }
         }
 
