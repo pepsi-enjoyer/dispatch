@@ -159,4 +159,4 @@ dispatch/
 
 ## Inspiration
 
-This project was inspired by [a video from Brian Harms](https://www.instagram.com/brian_harms/).
+Inspired by Brian Harms.
