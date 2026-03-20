@@ -90,8 +90,12 @@ pub fn clean_dispatch_msg(s: &str) -> String {
             out.push(c);
         }
     }
-    // Trim trailing shell artifacts: ") or ")
-    let out = out.trim().trim_end_matches('"').trim_end_matches(')').trim_end_matches('"');
+    // Truncate at closing ") from echo command — everything after is terminal noise.
+    let out = out.trim();
+    let out = match out.find("\")") {
+        Some(pos) => &out[..pos],
+        None => out,
+    };
     out.trim().to_string()
 }
 

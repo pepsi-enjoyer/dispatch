@@ -30,6 +30,11 @@ fn check_dispatch_marker(
 ) {
     if let Ok(line) = std::str::from_utf8(line_buf) {
         if let Some(pos) = line.find(marker) {
+            // Skip shell command lines (e.g. `echo "@@DISPATCH_MSG:..."`).
+            // Only process the actual echo output, where the marker starts the line.
+            if line[..pos].contains("echo") {
+                return;
+            }
             let msg = util::clean_dispatch_msg(&line[pos + marker.len()..]);
             if !msg.is_empty() && msg != *last_msg {
                 *last_msg = msg.clone();
