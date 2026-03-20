@@ -360,8 +360,8 @@ class MainActivity : AppCompatActivity() {
         val displayName = if (sender == "Dispatcher") "Console" else sender
 
         val colorInt = when (sender) {
-            "You" -> getColor(R.color.green)
-            "Dispatcher" -> getColor(R.color.magenta)
+            "You" -> getColor(R.color.red)
+            "Dispatcher" -> getColor(R.color.green)
             "System" -> getColor(R.color.dim_grey)
             else -> callsignColor(sender) // Distinct color per agent callsign
         }
