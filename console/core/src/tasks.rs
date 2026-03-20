@@ -1,7 +1,7 @@
 // Task plan parsing for .dispatch/tasks.md files.
 //
-// Extracted from main.rs — contains the ParsedTask struct and parse_task_line
-// function used by the console to track task dependencies and dispatch order.
+// Contains the ParsedTask struct and parse_task_line function used by the
+// console to track task dependencies and dispatch order.
 
 /// A parsed task line from .dispatch/tasks.md.
 pub struct ParsedTask {
