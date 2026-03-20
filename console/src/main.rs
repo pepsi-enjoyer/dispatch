@@ -228,6 +228,8 @@ fn main() -> io::Result<()> {
 
         // Advance ticker animation each frame (dispatch-ami).
         app.tick_ticker();
+        // Advance status blink animation (REC-light pulse).
+        app.tick_status_blink();
 
         // dispatch-guj: pick up background-spawned orchestrator when ready.
         if app.orchestrator.is_none() {

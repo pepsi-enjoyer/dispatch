@@ -81,15 +81,27 @@ pub fn render_ticker(f: &mut Frame, area: Rect, app: &App) {
 }
 
 pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
-    let radio_span = match app.radio_state {
-        RadioState::Connected => Span::styled(
-            "● CONNECTED",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        ),
-        RadioState::Disconnected => Span::styled(
-            "● DISCONNECTED",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
+    // Status indicator pulses like a REC light: dot blinks on/off, text stays visible.
+    let blink_on = app.status_blink_on();
+    let (dot, dot_style, text, text_style) = match app.radio_state {
+        RadioState::Connected => {
+            let dot_char = if blink_on { "● " } else { "  " };
+            (
+                dot_char,
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                "CONNECTED",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            )
+        }
+        RadioState::Disconnected => {
+            let dot_char = if blink_on { "● " } else { "  " };
+            (
+                dot_char,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                "DISCONNECTED",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )
+        }
     };
 
     let clock = chrono::Local::now().format("%H:%M").to_string();
@@ -138,7 +150,8 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
 
     let status_line = Line::from(vec![
         Span::raw(left_text),
-        radio_span,
+        Span::styled(dot, dot_style),
+        Span::styled(text, text_style),
         Span::styled(right_padded, Style::default().fg(Color::White)),
     ]);
 

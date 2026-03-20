@@ -53,6 +53,7 @@ impl App {
             orchestrator: None,
             pending_voice: Vec::new(),
             chat_tx,
+            status_blink_frame: 0,
         }
     }
 
@@ -145,6 +146,18 @@ impl App {
         if let Workspace::MultiRepo { parent, repos } = &mut self.workspace {
             *repos = crate::util::scan_child_repos(parent);
         }
+    }
+
+    /// Advance the status blink frame counter.
+    /// Called once per render loop (~16ms). Produces a ~1s cycle (60 frames).
+    pub fn tick_status_blink(&mut self) {
+        self.status_blink_frame = self.status_blink_frame.wrapping_add(1);
+    }
+
+    /// Whether the status indicator dot should be "on" (visible) this frame.
+    /// On for ~70% of the cycle, off for ~30% — mimics a recording indicator light.
+    pub fn status_blink_on(&self) -> bool {
+        (self.status_blink_frame % 60) < 42
     }
 
     /// Queue a message on the ticker (dispatch-ami).
