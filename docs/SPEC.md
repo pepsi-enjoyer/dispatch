@@ -137,14 +137,12 @@ Tasks are tracked in `.dispatch/tasks.md` at the repo root. The orchestrator han
 
 ### Task Decomposition
 
-When a voice prompt describes a complex task (e.g. "refactor the auth system"), the orchestrator decomposes it inline:
+When a voice prompt describes a complex task (e.g. "refactor the auth system"), the orchestrator decomposes it directly:
 
-1. **Decomposition**: the orchestrator analyzes the task itself, identifies subtasks, and determines dependencies.
-2. **Plan output**: the orchestrator writes the task breakdown with IDs, descriptions, and dependency arrows to `.dispatch/tasks.md`.
-3. **Dispatch begins**: the orchestrator calls `dispatch` for each unblocked subtask.
-
-The ticker line (see [Ticker](#ticker)) shows decomposition progress in real-time.
-
+1. **Analysis**: the orchestrator identifies the distinct pieces of work and their dependencies.
+2. **Plan output**: the orchestrator writes the task breakdown to `.dispatch/tasks.md` with IDs, descriptions, and dependency arrows.
+3. **Dispatch begins**: the orchestrator calls `dispatch` for each independent (unblocked) task, running them in parallel.
+4. **Sequencing**: as `TASK_COMPLETE` events arrive, the orchestrator dispatches dependent tasks that are now unblocked.
 For simple one-off prompts (e.g. "Alpha, fix this typo"), the orchestrator calls `dispatch` directly without decomposition. See [ORCHESTRATOR.md](ORCHESTRATOR.md) for the full decision-making logic.
 
 ### Git Worktrees
@@ -190,17 +188,16 @@ In multi-repo mode:
 
 ### Task Lifecycle
 
-**Complex task (with decomposition):**
+**Complex task (decomposition flow):**
 
 ```
 Voice: "refactor the auth system"
-  -> Orchestrator decomposes into subtasks
+  -> Orchestrator analyzes task, writes breakdown to .dispatch/tasks.md
   -> Ticker: "Decomposing: refactor the auth system..."
-  -> Orchestrator writes .dispatch/tasks.md with breakdown
-  -> Dispatches agents into worktrees (one per unblocked task)
+  -> Dispatches agents into worktrees for unblocked tasks
   -> On completion: merge, mark [x], check what's unblocked
   -> Dispatches next ready tasks
-  -> Repeat until all subtasks done
+  -> Repeat until all tasks are done
 ```
 
 **Simple prompt (direct flow):**
@@ -223,7 +220,7 @@ Voice: "Alpha, fix the login bug"
 
 When a prompt arrives without a specified agent:
 
-1. The orchestrator creates a task (or decomposes it into subtasks if the prompt is complex).
+1. The orchestrator creates a task (or decomposes it into subtasks if the task is complex).
 2. It checks agent states:
    - If an idle agent exists, assign the task to it.
    - If all agents are busy and an empty slot exists, dispatch a new agent (default tool: `claude-code`) and assign the task.
@@ -323,7 +320,7 @@ The console displays task state across multiple areas:
 Pressing `o` in command mode replaces the 2x2 agent grid with a full-height scrollable log of orchestrator events. Each entry is timestamped and categorized:
 
 - **MIC**: incoming voice transcripts from the radio.
-- **PLAN**: task decomposition start, completion (with task count), or failure.
+- **DECOMPOSE**: task decomposition start, completion (with task count), or failure.
 - **TASK**: task creation in `.dispatch/tasks.md`.
 - **ASSIGN**: task assigned to an agent slot.
 - **DONE**: task completed (idle prompt detected or inactivity timeout).
