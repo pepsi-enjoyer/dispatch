@@ -13,9 +13,12 @@ pub const MAX_SLOTS: usize = 26;
 
 /// Events sent from the WebSocket handler to the main TUI thread so that
 /// PTY operations (which must happen on the main thread) can be executed.
+#[derive(Debug)]
 pub enum WsEvent {
     /// Voice transcript from the radio — forwarded to the orchestrator (dispatch-h62).
     VoiceTranscript { text: String },
+    /// A client connected with an invalid PSK.
+    InvalidPsk { addr: String },
 }
 
 // --- Agent state ---------------------------------------------------------
@@ -448,6 +451,7 @@ mod tests {
             WsEvent::VoiceTranscript { text } => {
                 assert_eq!(text, "write tests");
             }
+            other => panic!("unexpected event: {:?}", other),
         }
     }
 
@@ -507,6 +511,7 @@ mod tests {
             WsEvent::VoiceTranscript { text } => {
                 assert_eq!(text, "fix the login bug");
             }
+            other => panic!("unexpected event: {:?}", other),
         }
 
         // Long prompt — same behavior (no word-count routing)
@@ -523,6 +528,7 @@ mod tests {
             WsEvent::VoiceTranscript { text } => {
                 assert!(text.contains("refactor"));
             }
+            other => panic!("unexpected event: {:?}", other),
         }
     }
 }
