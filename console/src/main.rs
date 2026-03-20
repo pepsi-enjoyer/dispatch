@@ -269,7 +269,7 @@ struct App {
     /// 0-indexed into the current page's 4 visible slots.
     target: usize,
     mode: Mode,
-    last_was_escape: bool,
+    esc_exit_time: Option<Instant>,
     radio_state: RadioState,
     psk: String,
     port: u16,
@@ -337,7 +337,7 @@ impl App {
             current_page: 0,
             target: 0,
             mode: Mode::Command,
-            last_was_escape: false,
+            esc_exit_time: None,
             radio_state: RadioState::Disconnected,
             psk,
             port,
@@ -1982,8 +1982,8 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
             "  INPUT MODE",
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::raw("  Esc          Return to command mode")),
-        Line::from(Span::raw("  Esc Esc      Send literal Escape to PTY")),
+        Line::from(Span::raw("  Esc          Return to command mode (immediate)")),
+        Line::from(Span::raw("  Esc Esc      Send literal Escape to PTY (quick double-tap)")),
         Line::default(),
         Line::from(Span::styled(
             "  Press any key to close",
@@ -2951,23 +2951,10 @@ fn main() -> io::Result<()> {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match app.mode {
                     // Input mode: keystrokes forwarded to targeted PTY (dispatch-bgz.4)
                     Mode::Input => {
+                        // dispatch-qwd: Esc immediately exits input mode
                         if key.code == KeyCode::Esc {
-                            if app.last_was_escape {
-                                let target_g = app.target_global();
-                                if let Some(Some(slot)) = app.slots.get_mut(target_g) {
-                                    let _ = slot.writer.write_all(b"\x1b");
-                                    let _ = slot.writer.flush();
-                                }
-                                app.last_was_escape = false;
-                            } else {
-                                app.last_was_escape = true;
-                            }
-                            continue 'main;
-                        }
-
-                        if app.last_was_escape {
                             app.mode = Mode::Command;
-                            app.last_was_escape = false;
+                            app.esc_exit_time = Some(Instant::now());
                             app.input_line_buf.clear(); // dispatch-ct2.8
                             continue 'main;
                         }
@@ -3236,7 +3223,7 @@ fn main() -> io::Result<()> {
                                         slot.scroll_offset = 0;
                                     }
                                     app.mode = Mode::Input;
-                                    app.last_was_escape = false;
+                                    app.esc_exit_time = None;
                                     app.input_line_buf.clear(); // dispatch-ct2.8
                                 }
 
@@ -3400,6 +3387,19 @@ fn main() -> io::Result<()> {
                                         if let Some(Some(slot)) = app.slots.get_mut(target_g) {
                                             let half = (app.pane_rows as usize) / 2;
                                             slot.scroll_offset = slot.scroll_offset.saturating_sub(half);
+                                        }
+                                    }
+                                }
+
+                                // dispatch-qwd: double-Esc sends literal Escape to PTY
+                                KeyCode::Esc => {
+                                    if let Some(t) = app.esc_exit_time.take() {
+                                        if t.elapsed() < Duration::from_millis(300) {
+                                            let target_g = app.target_global();
+                                            if let Some(Some(slot)) = app.slots.get_mut(target_g) {
+                                                let _ = slot.writer.write_all(b"\x1b");
+                                                let _ = slot.writer.flush();
+                                            }
                                         }
                                     }
                                 }
