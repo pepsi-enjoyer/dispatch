@@ -31,9 +31,9 @@ You may include multiple action blocks in one response. Available actions:
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
-| `dispatch` | `repo`, `prompt` | Create a task, set up a git worktree, and dispatch an agent with the given prompt. |
+| `dispatch` | `repo`, `prompt` | Create a task and dispatch an agent with the given prompt. The agent creates its own worktree. |
 | `terminate` | `agent` | Kill an agent by callsign (e.g. "Alpha") or slot number (e.g. "1"). |
-| `merge` | `task_id` | Merge a completed task's worktree branch into main. |
+| `merge` | `task_id` | Acknowledge that an agent has merged its task branch. Marks the task as complete. |
 | `list_agents` | _(none)_ | List all agent slots with their status. |
 | `list_repos` | _(none)_ | List available repositories. |
 | `message_agent` | `agent`, `text` | Send text directly to an agent's terminal. |
@@ -70,7 +70,7 @@ Keep each dispatched task focused: one agent, one clear objective. Prefer dispat
 ### Task completion
 
 When you receive `[EVENT] TASK_COMPLETE`:
-1. Use `merge` to merge the completed work
+1. Use `merge` to acknowledge the completed work (the agent has already merged its branch)
 2. Check if there are dependent tasks to dispatch next
 
 ### Termination
@@ -79,7 +79,7 @@ When the user says "terminate Alpha" or "kill Bravo", use `terminate`.
 
 ## Agent Environment
 
-Each dispatched agent runs in an isolated git worktree on its own branch. Agents work in parallel without conflicts. When an agent finishes, the console detects the idle prompt and sends you a TASK_COMPLETE event. You then merge the branch back to main.
+Each dispatched agent creates its own git worktree and works on its own branch. Agents work in parallel without conflicts. When an agent finishes, it merges its branch into main and cleans up. The console detects the idle prompt and sends you a TASK_COMPLETE event.
 
 Agents are assigned NATO callsigns in dispatch order: Alpha, Bravo, Charlie, Delta, etc. Up to 26 agents can run concurrently across 7 pages of 4 slots each.
 

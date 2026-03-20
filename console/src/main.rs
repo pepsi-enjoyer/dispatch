@@ -46,7 +46,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     io::{self, Read, Write},
-    process::{Command, Stdio},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex,
@@ -204,7 +204,6 @@ struct SlotState {
     custom_name: Option<String>, // user rename (dispatch-bgz.3)
     tool: String,
     task_id: Option<String>,
-    worktree_path: Option<String>, // git worktree path for this task (dispatch-xje)
     repo_name: String,             // short repo dir name for grid header (dispatch-2dc)
     repo_root: String,             // absolute repo root for this slot (dispatch-sa1)
     dispatch_time: Instant,
@@ -222,8 +221,6 @@ struct SlotState {
     idle_since: Option<Instant>, // when idle prompt was first seen (for 500ms debounce)
     // Scrollback (dispatch-ct2.4): lines scrolled back from bottom
     scroll_offset: usize,
-    // Merge conflict retry count (dispatch-0ci). 0 = first attempt, 1 = resolution agent.
-    merge_retries: u8,
 }
 
 impl SlotState {
@@ -606,19 +603,16 @@ impl App {
                     },
                 };
 
-                // Create worktree.
-                let worktree = create_worktree(&task_id, &target_repo);
-
                 // Determine callsign before spawn so it can be included in the prompt.
                 let callsign_for_prompt = dispatch_core::protocol::default_callsign((slot_idx + 1) as u32).to_string();
-                let full_prompt = format!("Your callsign is {}. {}", callsign_for_prompt, prompt);
+                let full_prompt = format!("Your callsign is {}. Your task ID is {}. {}", callsign_for_prompt, task_id, prompt);
 
-                // Spawn PTY if slot is empty.
+                // Spawn PTY if slot is empty. Agent creates its own worktree (dispatch-bka).
                 if self.slots[slot_idx].is_none() {
                     let cmd = self.tool_cmd("claude-code").to_string();
                     match dispatch_slot(
                         slot_idx, "claude-code", &cmd, self.pane_rows, self.pane_cols,
-                        worktree.as_deref(), self.scrollback_lines,
+                        None, self.scrollback_lines,
                         repo_name_from_path(&target_repo), &target_repo,
                         Some(&full_prompt),
                     ) {
@@ -634,7 +628,6 @@ impl App {
                     let slot = self.slots[slot_idx].as_mut().unwrap();
                     update_task_in_file(&target_repo, &task_id, '~', Some(&slot.callsign));
                     slot.task_id = Some(task_id.clone());
-                    slot.worktree_path = worktree;
                     slot.last_output_at = Instant::now();
                     slot.display_name().to_string()
                 };
@@ -712,29 +705,18 @@ impl App {
                 }
             }
 
+            // dispatch-bka: agents now merge their own branches, so this just
+            // acknowledges the completion and updates the task file.
             tools::ToolCall::Merge { task_id } => {
                 let target_repo = self.default_repo_root().to_string();
-                let success = merge_worktree(task_id, &target_repo);
-                if success {
-                    update_task_in_file(&target_repo, task_id, 'x', None);
-                    self.push_orch(OrchestratorEventKind::Merged { id: task_id.clone() });
-                    self.push_ticker(format!("MERGED: task/{}", task_id));
-                    self.push_chat("Dispatcher", &format!("Merged task/{} into main.", task_id));
-                    tools::ToolResult::Merged {
-                        task_id: task_id.clone(),
-                        success: true,
-                        message: format!("task/{} merged into main", task_id),
-                    }
-                } else {
-                    self.conflict_tasks.push(task_id.clone());
-                    self.push_orch(OrchestratorEventKind::MergeConflict { id: task_id.clone() });
-                    self.push_ticker(format!("CONFLICT: task/{} — merge aborted", task_id));
-                    self.push_chat("Dispatcher", &format!("Merge conflict on task/{}.", task_id));
-                    tools::ToolResult::Merged {
-                        task_id: task_id.clone(),
-                        success: false,
-                        message: format!("merge conflict on task/{}, worktree preserved", task_id),
-                    }
+                update_task_in_file(&target_repo, task_id, 'x', None);
+                self.push_orch(OrchestratorEventKind::Merged { id: task_id.clone() });
+                self.push_ticker(format!("MERGED: task/{}", task_id));
+                self.push_chat("Dispatcher", &format!("task/{} merged.", task_id));
+                tools::ToolResult::Merged {
+                    task_id: task_id.clone(),
+                    success: true,
+                    message: format!("task/{} merged by agent", task_id),
                 }
             }
 
@@ -917,7 +899,6 @@ fn dispatch_slot(
         custom_name: None,
         tool: tool_key.to_string(),
         task_id: None,
-        worktree_path: None,
         repo_name: repo_name.to_string(),
         repo_root: repo_root.to_string(),
         dispatch_time: now,
@@ -931,7 +912,6 @@ fn dispatch_slot(
         last_screen_hash: 0,
         idle_since: None,
         scroll_offset: 0,
-        merge_retries: 0,
     })
 }
 
@@ -1172,13 +1152,13 @@ fn dispatch_ready_tasks(app: &mut App) -> usize {
             None => break, // No available slots; remaining tasks stay queued.
         };
 
-        // Spawn PTY if slot is empty.
+        // Spawn PTY if slot is empty. Agent creates its own worktree (dispatch-bka).
         if app.slots[slot_idx].is_none() {
-            let worktree = create_worktree(&task.id, &repo_root);
+            let prompt = format!("Your task ID is {}. {}", task.id, task.title);
             if let Some(slot) = dispatch_slot(
                 slot_idx, "claude-code", &tool_cmd, pane_rows, pane_cols,
-                worktree.as_deref(), scrollback, &short_repo, &repo_root,
-                Some(&task.title),
+                None, scrollback, &short_repo, &repo_root,
+                Some(&prompt),
             ) {
                 app.slots[slot_idx] = Some(slot);
             } else {
@@ -1190,9 +1170,7 @@ fn dispatch_ready_tasks(app: &mut App) -> usize {
         let display_name = {
             let slot = app.slots[slot_idx].as_mut().unwrap();
             update_task_in_file(&repo_root, &task.id, '~', Some(&slot.callsign));
-            let worktree = create_worktree(&task.id, &repo_root);
             slot.task_id = Some(task.id.clone());
-            slot.worktree_path = worktree;
             slot.last_output_at = Instant::now();
             slot.display_name().to_string()
         };
@@ -1247,96 +1225,9 @@ fn is_idle_prompt(screen: &vt100::Screen, tool: &str) -> bool {
     false
 }
 
-// ── worktree helpers (dispatch-xje) ───────────────────────────────────────────
-
-/// Create a git worktree for `task_id` at `.dispatch/.worktrees/{task_id}` on
-/// branch `task/{task_id}`. Returns the absolute worktree path on success.
-/// If the worktree already exists (task reassignment), returns the existing path.
-fn create_worktree(task_id: &str, repo_root: &str) -> Option<String> {
-    let worktrees_dir = format!("{}/.dispatch/.worktrees", repo_root);
-    let worktree_path = format!("{}/{}", worktrees_dir, task_id);
-    let branch = format!("task/{}", task_id);
-
-    let _ = std::fs::create_dir_all(&worktrees_dir);
-
-    // Reuse existing worktree on reassignment.
-    if std::path::Path::new(&worktree_path).exists() {
-        return Some(worktree_path);
-    }
-
-    let status = Command::new("git")
-        .args(["worktree", "add", &worktree_path, "-b", &branch, "HEAD"])
-        .current_dir(repo_root)
-        .status()
-        .ok()?;
-
-    if status.success() { Some(worktree_path) } else { None }
-}
-
-/// Merge `task/{task_id}` into the current branch. On success, removes the
-/// worktree and branch and returns true. On conflict, aborts and returns false.
-/// dispatch-0ci: rebases the task branch onto main before merging to auto-resolve
-/// non-overlapping conflicts from parallel agents.
-fn merge_worktree(task_id: &str, repo_root: &str) -> bool {
-    let branch = format!("task/{}", task_id);
-    let worktree_path = format!("{}/.dispatch/.worktrees/{}", repo_root, task_id);
-
-    // dispatch-0ci: rebase task branch onto main before merging.
-    if std::path::Path::new(&worktree_path).exists() {
-        let rebased = Command::new("git")
-            .args(["rebase", "main"])
-            .current_dir(&worktree_path)
-            .stdin(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !rebased {
-            let _ = Command::new("git")
-                .args(["rebase", "--abort"])
-                .current_dir(&worktree_path)
-                .stdin(Stdio::null())
-                .status();
-            return false;
-        }
-    }
-
-    let merged = Command::new("git")
-        .args(["merge", &branch, "--no-ff", "-m", &format!("merge {}", branch)])
-        .current_dir(repo_root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if merged {
-        let _ = Command::new("git")
-            .args(["worktree", "remove", &worktree_path, "--force"])
-            .stdin(Stdio::null())
-            .current_dir(repo_root)
-            .status();
-        // Fallback: remove directory manually if git worktree remove failed (Windows file locks)
-        if std::path::Path::new(&worktree_path).exists() {
-            let _ = std::fs::remove_dir_all(&worktree_path);
-            // Prune stale worktree entries
-            let _ = Command::new("git")
-                .args(["worktree", "prune"])
-                .stdin(Stdio::null())
-                .current_dir(repo_root)
-                .status();
-        }
-        let _ = Command::new("git")
-            .args(["branch", "-d", &branch])
-            .stdin(Stdio::null())
-            .current_dir(repo_root)
-            .status();
-        true
-    } else {
-        let _ = Command::new("git")
-            .args(["merge", "--abort"])
-            .current_dir(repo_root)
-            .status();
-        false
-    }
-}
+// dispatch-bka: worktree creation and merging are now handled by agents
+// themselves (see docs/AGENTS.md). The console no longer runs blocking git
+// worktree/merge commands on the main thread.
 
 fn key_to_pty_bytes(key: &KeyEvent) -> Vec<u8> {
     match key.code {
@@ -2638,9 +2529,7 @@ fn main() -> io::Result<()> {
                 if s.child_exited.load(Ordering::Relaxed) {
                     let callsign = s.display_name().to_string();
                     let task_id = s.task_id.clone();
-                    let worktree_path = s.worktree_path.clone();
                     let slot_repo = s.repo_root.clone();
-                    let merge_retries = s.merge_retries;
                     app.slots[i] = None;
                     // Sync ws_state so the handler knows this slot is empty (dispatch-boa).
                     {
@@ -2654,62 +2543,8 @@ fn main() -> io::Result<()> {
                         if let Some(orch) = &mut app.orchestrator {
                             orch.send_message(&format!("[EVENT] TASK_COMPLETE agent={} task={}", callsign, id));
                         }
-                        // dispatch-xje: merge worktree before closing; flag on conflict.
-                        if worktree_path.is_some() {
-                            if merge_worktree(&id, &slot_repo) {
-                                app.push_orch(OrchestratorEventKind::Merged { id: id.clone() });
-                                app.push_ticker(format!("TASK COMPLETE: {} merged {} — slot {} now standby", callsign, id, i + 1));
-                                app.push_chat("Dispatcher", &format!("Merged task/{} into main.", id));
-                            } else if merge_retries == 0 {
-                                // dispatch-0ci: dispatch a resolution agent on first conflict.
-                                let cmd = app.tool_cmd("claude-code").to_string();
-                                let resolve_prompt = format!(
-                                    "The branch task/{} has merge conflicts with main. \
-                                     Run `git rebase main`, resolve all conflicts in each file, \
-                                     then `git add` the resolved files and `git rebase --continue`. \
-                                     Repeat until the rebase is complete. Ensure a clean worktree \
-                                     before returning to the prompt.",
-                                    id
-                                );
-                                if let Some(mut slot) = dispatch_slot(
-                                    i, "claude-code", &cmd, app.pane_rows, app.pane_cols,
-                                    worktree_path.as_deref(), app.scrollback_lines,
-                                    repo_name_from_path(&slot_repo), &slot_repo,
-                                    Some(&resolve_prompt),
-                                ) {
-                                    slot.task_id = Some(id.clone());
-                                    slot.worktree_path = worktree_path;
-                                    slot.merge_retries = 1;
-                                    app.slots[i] = Some(slot);
-                                    app.push_ticker(format!(
-                                        "CONFLICT: dispatching agent to resolve {} in slot {}", id, i + 1
-                                    ));
-                                    app.push_chat("Dispatcher", &format!(
-                                        "Merge conflict on task/{}. Dispatching resolution agent.", id
-                                    ));
-                                    continue;
-                                }
-                                // dispatch_slot failed — fall through to manual conflict.
-                                app.push_orch(OrchestratorEventKind::MergeConflict { id: id.clone() });
-                                app.conflict_tasks.push(id.clone());
-                                app.push_ticker(format!("MERGE CONFLICT: {} — resolve manually", id));
-                                app.push_chat("Dispatcher", &format!("Merge conflict on task/{}.", id));
-                                if let Some(orch) = &mut app.orchestrator {
-                                    orch.send_message(&format!("[EVENT] MERGE_CONFLICT task={}", id));
-                                }
-                            } else {
-                                // dispatch-0ci: max retries exhausted — flag for manual resolution.
-                                app.push_orch(OrchestratorEventKind::MergeConflict { id: id.clone() });
-                                app.conflict_tasks.push(id.clone());
-                                app.push_ticker(format!("MERGE CONFLICT: {} — resolve manually", id));
-                                app.push_chat("Dispatcher", &format!("Merge conflict on task/{}.", id));
-                                if let Some(orch) = &mut app.orchestrator {
-                                    orch.send_message(&format!("[EVENT] MERGE_CONFLICT task={}", id));
-                                }
-                            }
-                        } else {
-                            app.push_ticker(format!("TASK COMPLETE: {} closed {} — slot {} now standby", callsign, id, i + 1));
-                        }
+                        // dispatch-bka: agent merges its own branch before exiting.
+                        app.push_ticker(format!("TASK COMPLETE: {} closed {} — slot {} now standby", callsign, id, i + 1));
                         update_task_in_file(&slot_repo, &id, 'x', None);
                         // Dispatch newly unblocked tasks after completion.
                         dispatch_ready_tasks(&mut app);
@@ -2808,7 +2643,7 @@ fn main() -> io::Result<()> {
                 if let Some(slot) = app.slots[i].as_mut() {
                     let callsign = slot.callsign.clone();
                     if update_task_in_file(&slot_repo, &qt.id, '~', Some(&callsign)) {
-                        let prompt = format!("[Dispatch task {}] {}\r", qt.id, qt.title);
+                        let prompt = format!("Your task ID is {}. {}\r", qt.id, qt.title);
                         let _ = slot.writer.write_all(prompt.as_bytes());
                         let _ = slot.writer.flush();
                         slot.task_id = Some(qt.id.clone());

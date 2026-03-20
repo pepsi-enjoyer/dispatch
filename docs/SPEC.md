@@ -147,26 +147,23 @@ For simple one-off prompts (e.g. "Alpha, fix this typo"), the orchestrator calls
 
 ### Git Worktrees
 
-Each task runs in an isolated git worktree to prevent agents from stepping on each other.
+Each task runs in an isolated git worktree to prevent agents from stepping on each other. Agents create and manage their own worktrees to avoid blocking the console's TUI thread with synchronous git operations.
 
 **On task assignment:**
 
-```
-git worktree add .dispatch/.worktrees/{task_id} -b task/{task_id}
-```
+The agent's PTY is launched in the repo root. The agent's prompt includes its task ID. The agent creates its own worktree:
 
-The agent's PTY is launched with its working directory set to the worktree path. The agent sees a normal git repo and works as usual.
+```
+git worktree add .dispatch/.worktrees/{task_id} -b task/{task_id} HEAD
+```
 
 **On task completion:**
 
-1. The console rebases the task branch onto main (auto-resolves non-overlapping conflicts from parallel agents), then merges the rebased branch back to main with `--no-ff`.
-2. If the merge succeeds, the worktree is cleaned up: `git worktree remove .dispatch/.worktrees/{task_id}`.
-3. If the rebase has conflicts, the console dispatches a resolution agent into the existing worktree to resolve them. The resolution agent rebases onto main, resolves conflicts, and returns to the prompt. On completion, the console retries the merge.
-4. If the resolution agent also fails to merge, the console flags it on the ticker and leaves the worktree intact for manual review.
+The agent merges its own branch back to main, removes the worktree, and deletes the branch before returning to idle. If the merge has conflicts, the agent stops and returns to the prompt; the console flags the conflict for manual review.
 
 **On agent termination:**
 
-If an agent is terminated before completing its task, the worktree and branch are preserved. The task is marked `[ ]` (open) so it can be picked up later -- the next agent assigned to it reuses the existing worktree.
+If an agent is terminated before completing its task, the worktree and branch are preserved. The task is marked `[ ]` (open) so it can be picked up later.
 
 The `.dispatch/` directory is gitignored.
 
@@ -195,8 +192,8 @@ In multi-repo mode:
 Voice: "refactor the auth system"
   -> Orchestrator analyzes task, writes breakdown to .dispatch/tasks.md
   -> Ticker: "Decomposing: refactor the auth system..."
-  -> Dispatches agents into worktrees for unblocked tasks
-  -> On completion: merge, mark [x], check what's unblocked
+  -> Dispatches agents for unblocked tasks (agents create own worktrees)
+  -> On completion: mark [x], check what's unblocked
   -> Dispatches next ready tasks
   -> Repeat until all tasks are done
 ```
@@ -206,9 +203,9 @@ Voice: "refactor the auth system"
 ```
 Voice: "Alpha, fix the login bug"
   -> Console creates single task in .dispatch/tasks.md
-  -> Creates worktree, assigns to Alpha
-  -> Alpha works in worktree
-  -> On completion: merge, mark [x], clean up
+  -> Assigns to Alpha (agent creates its own worktree)
+  -> Alpha works in worktree, merges to main when done
+  -> On completion: mark [x]
 ```
 
 **Prompt delivery:** the prompt text is sent to the agent's terminal, prefixed with a context line:
@@ -246,9 +243,9 @@ The console parses the `"action"` field to determine which tool to execute. Para
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
-| `dispatch` | `repo`, `prompt` | Create a task, set up a git worktree, and dispatch an agent. Returns slot, callsign, and task ID. |
+| `dispatch` | `repo`, `prompt` | Create a task and dispatch an agent. The agent creates its own worktree. Returns slot, callsign, and task ID. |
 | `terminate` | `agent` | Kill an agent by callsign or slot number. Frees the slot and reopens the task for reassignment. |
-| `merge` | `task_id` | Merge a task's worktree branch into main. Returns success/failure with conflict details. |
+| `merge` | `task_id` | Acknowledge that an agent has merged its task branch. Marks the task as complete. |
 | `list_agents` | _(none)_ | List all active agent slots with callsign, tool, busy/idle status, current task, and repo. |
 | `list_repos` | _(none)_ | List available repositories that agents can work in. |
 | `message_agent` | `agent`, `text` | Send text to an agent's terminal (PTY). Use for follow-up instructions or answering agent questions. |
