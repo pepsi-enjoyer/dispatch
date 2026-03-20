@@ -156,3 +156,7 @@ dispatch/
     ORCHESTRATOR.md    # Orchestrator behavior and tool reference
     AGENTS.md          # Template injected into agent prompts
 ```
+
+## Inspiration
+
+Inspired by Brian Harms.
