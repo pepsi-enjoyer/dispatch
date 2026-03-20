@@ -2642,6 +2642,11 @@ fn main() -> io::Result<()> {
                     let slot_repo = s.repo_root.clone();
                     let merge_retries = s.merge_retries;
                     app.slots[i] = None;
+                    // Sync ws_state so the handler knows this slot is empty (dispatch-boa).
+                    {
+                        let mut st = app.ws_state.lock().unwrap();
+                        st.slots[i] = None;
+                    }
                     if let Some(id) = task_id {
                         app.push_orch(OrchestratorEventKind::TaskComplete { id: id.clone(), agent: callsign.clone() });
                         app.push_chat(&callsign, &format!("Task {} complete.", id));
@@ -2781,6 +2786,15 @@ fn main() -> io::Result<()> {
                 slot.task_id = None;
                 slot.idle_since = None;
             }
+            // Sync ws_state so the WebSocket handler knows this slot is idle
+            // and can accept follow-up tasks (dispatch-boa).
+            {
+                let mut st = app.ws_state.lock().unwrap();
+                if let Some(ref mut agent) = st.slots[i] {
+                    agent.status = ws_server::AgentStatus::Idle;
+                    agent.task = None;
+                }
+            }
             update_task_in_file(&slot_repo, &task_id, 'x', None);
 
             // Dispatch newly unblocked tasks after completion.
@@ -2804,7 +2818,13 @@ fn main() -> io::Result<()> {
                     }
                 }
                 if assigned {
-                    app.push_orch(OrchestratorEventKind::TaskAssigned { id: qt.id.clone(), agent: assigned_callsign, slot: i + 1 });
+                    app.push_orch(OrchestratorEventKind::TaskAssigned { id: qt.id.clone(), agent: assigned_callsign.clone(), slot: i + 1 });
+                    // Sync ws_state for the new task assignment (dispatch-boa).
+                    let mut st = app.ws_state.lock().unwrap();
+                    if let Some(ref mut agent) = st.slots[i] {
+                        agent.status = ws_server::AgentStatus::Busy;
+                        agent.task = Some(qt.id.clone());
+                    }
                 }
                 app.queued_tasks.retain(|t| t.id != qt.id);
             }
