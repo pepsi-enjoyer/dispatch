@@ -10,8 +10,18 @@ obelisk.toml
 
 # Dolt database files
 .dolt/
+dolt/
+dolt-server.*
 config.yaml
 *.db
 
+# Claude Code
+.claude/
+
 # Local logs
 logs/
+
+# Android build artifacts
+radio/app/build/
+radio/gradle/wrapper/gradle-wrapper.jar
+radio/gradlew.bat
