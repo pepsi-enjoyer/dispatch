@@ -44,8 +44,9 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Clean a dispatch message: strip ANSI escapes and non-printable chars,
-/// then trim shell artifacts like trailing `")` from echo output.
+/// Clean a dispatch message: convert cursor-forward sequences to spaces,
+/// strip remaining ANSI escapes and non-printable chars, then trim shell
+/// artifacts like trailing `")` from echo output.
 pub fn clean_dispatch_msg(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -53,10 +54,22 @@ pub fn clean_dispatch_msg(s: &str) -> String {
         if c == '\x1b' {
             match chars.next() {
                 Some('[') => {
-                    // CSI sequence: consume until final byte (0x40-0x7E)
-                    for c2 in chars.by_ref() {
-                        if ('\x40'..='\x7e').contains(&c2) {
-                            break;
+                    // CSI sequence: collect params, then check final byte.
+                    let mut param = String::new();
+                    loop {
+                        match chars.next() {
+                            Some(fb) if ('\x40'..='\x7e').contains(&fb) => {
+                                if fb == 'C' {
+                                    // Cursor forward -> insert space(s).
+                                    let n: usize = param.parse().unwrap_or(1);
+                                    for _ in 0..n.min(8) {
+                                        out.push(' ');
+                                    }
+                                }
+                                break;
+                            }
+                            Some(c2) => param.push(c2),
+                            None => break,
                         }
                     }
                 }

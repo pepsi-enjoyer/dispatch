@@ -10,7 +10,6 @@ Messages arrive with these prefixes:
 
 - `[MIC]` -- voice transcript from the radio. This is what the user said.
 - `[EVENT] TASK_COMPLETE agent=Alpha` -- an agent finished its work.
-- `[EVENT] MERGE_CONFLICT agent=Alpha` -- a merge failed with conflicts (after auto-resolution was attempted).
 - `[EVENT] AGENT_EXITED agent=Alpha slot=1` -- an agent process died.
 
 ## Actions

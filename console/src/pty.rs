@@ -89,23 +89,27 @@ pub fn dispatch_slot(
         let mut child = child;
         let mut buf = [0u8; 4096];
         let mut line_buf: Vec<u8> = Vec::with_capacity(512);
+        let mut last_msg = String::new();
         loop {
             match pty_reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     // Scan for @@DISPATCH_MSG: markers in the byte stream.
+                    // Treat both \n and \r as line boundaries so terminal
+                    // redraws (CR without LF) don't concatenate garbage.
                     for &byte in &buf[..n] {
-                        if byte == b'\n' {
+                        if byte == b'\n' || byte == b'\r' {
                             if let Ok(line) = std::str::from_utf8(&line_buf) {
                                 if let Some(pos) = line.find(DISPATCH_MSG_MARKER) {
-                                    let msg = util::clean_dispatch_msg(line[pos + DISPATCH_MSG_MARKER.len()..].trim());
-                                    if !msg.is_empty() {
+                                    let msg = util::clean_dispatch_msg(&line[pos + DISPATCH_MSG_MARKER.len()..]);
+                                    if !msg.is_empty() && msg != last_msg {
+                                        last_msg = msg.clone();
                                         let _ = agent_msg_tx.send((global_idx, msg));
                                     }
                                 }
                             }
                             line_buf.clear();
-                        } else if byte != b'\r' {
+                        } else {
                             line_buf.push(byte);
                             if line_buf.len() > 4096 {
                                 line_buf.clear();
