@@ -45,6 +45,26 @@ Before finishing:
 
 If the merge fails due to conflicts, the console flags it on the ticker and preserves your worktree for manual review.
 
+## Talking to the Dispatcher
+
+You can send messages back to the Dispatcher (the orchestrator coordinating all agents) by outputting a line with the `[TO DISPATCH]` marker:
+
+```bash
+echo "[TO DISPATCH] auth.rs has two login functions - which one should I fix?"
+```
+
+The console detects this pattern in your terminal output and relays it to the Dispatcher, who can respond via your terminal.
+
+**When to use it:**
+- Asking for clarification on ambiguous requirements
+- Reporting blockers that prevent you from completing the task
+- Requesting information that another agent might have
+- Reporting important findings the Dispatcher should know about
+
+**When NOT to use it:**
+- Routine progress updates (the Dispatcher can see your terminal output)
+- Completion status (the console detects that automatically)
+
 ## Rules
 
 - Do NOT modify `.dispatch/tasks.md` -- the console manages it.

@@ -173,6 +173,8 @@ enum OrchestratorEventKind {
     ToolCallIssued { name: String },
     /// Tool result sent back to orchestrator (dispatch-h62).
     ToolResultSent { name: String, success: bool },
+    /// Agent sent a message to the dispatcher (dispatch-1we).
+    AgentMessage { agent: String, text: String },
 }
 
 /// Workspace mode: single repo or multi-repo parent directory (dispatch-sa1).
@@ -231,6 +233,8 @@ struct SlotState {
     idle_since: Option<Instant>, // when idle prompt was first seen (for 500ms debounce)
     // Scrollback (dispatch-ct2.4): lines scrolled back from bottom
     scroll_offset: usize,
+    // Agent-to-dispatcher messages already relayed (dispatch-1we)
+    seen_dispatch_msgs: Vec<String>,
 }
 
 impl SlotState {
@@ -964,6 +968,7 @@ fn dispatch_slot(
         last_screen_hash: 0,
         idle_since: None,
         scroll_offset: 0,
+        seen_dispatch_msgs: Vec::new(),
     })
 }
 
@@ -1330,6 +1335,24 @@ fn is_idle_prompt(screen: &vt100::Screen, tool: &str) -> bool {
         }
     }
     false
+}
+
+/// Scan screen rows for `[TO DISPATCH]` markers and return the message texts
+/// found (dispatch-1we).
+fn scan_dispatch_messages(screen: &vt100::Screen) -> Vec<String> {
+    let marker = "[TO DISPATCH]";
+    let (rows, _) = screen.size();
+    let mut msgs = Vec::new();
+    for r in 0..rows {
+        let text = screen_row_text(screen, r);
+        if let Some(idx) = text.find(marker) {
+            let msg = text[idx + marker.len()..].trim().to_string();
+            if !msg.is_empty() {
+                msgs.push(msg);
+            }
+        }
+    }
+    msgs
 }
 
 // ── worktree helpers (dispatch-xje) ───────────────────────────────────────────
@@ -1908,6 +1931,11 @@ fn render_orchestrator(f: &mut Frame, area: Rect, app: &App) {
                 "RESULT",
                 if *success { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) },
                 format!("<- {} {}", name, if *success { "ok" } else { "error" }),
+            ),
+            OrchestratorEventKind::AgentMessage { agent, text } => (
+                "MSG",
+                Style::default().fg(Color::Cyan),
+                format!("{}: {}", agent, truncate(text, 100)),
             ),
         };
         lines.push(Line::from(vec![
@@ -2898,6 +2926,40 @@ fn main() -> io::Result<()> {
                     app.push_orch(OrchestratorEventKind::TaskAssigned { id: qt.id.clone(), agent: assigned_callsign, slot: i + 1 });
                 }
                 app.queued_tasks.retain(|t| t.id != qt.id);
+            }
+        }
+
+        // dispatch-1we: detect agent-to-dispatcher messages in terminal output.
+        let mut agent_messages: Vec<(usize, String)> = Vec::new();
+        for i in 0..MAX_SLOTS {
+            if let Some(slot) = app.slots[i].as_mut() {
+                let msgs = {
+                    let parser = slot.screen.lock().unwrap();
+                    scan_dispatch_messages(parser.screen())
+                };
+                for msg in msgs {
+                    if !slot.seen_dispatch_msgs.contains(&msg) {
+                        slot.seen_dispatch_msgs.push(msg.clone());
+                        agent_messages.push((i, msg));
+                    }
+                }
+                // Cap seen messages to bound memory.
+                if slot.seen_dispatch_msgs.len() > 100 {
+                    slot.seen_dispatch_msgs.drain(..50);
+                }
+            }
+        }
+        // dispatch-1we: relay agent messages to orchestrator and chat log.
+        for (slot_idx, msg) in agent_messages {
+            if let Some(slot) = &app.slots[slot_idx] {
+                let callsign = slot.display_name().to_string();
+                app.push_orch(OrchestratorEventKind::AgentMessage { agent: callsign.clone(), text: msg.clone() });
+                app.push_chat(&callsign, &msg);
+                app.push_ticker(format!("MSG FROM {}: {}", callsign, msg));
+            }
+            if let Some(orch) = &mut app.orchestrator {
+                let callsign = app.slots[slot_idx].as_ref().map(|s| s.display_name().to_string()).unwrap_or_default();
+                orch.send_message(&format!("[MSG] {}: {}", callsign, msg));
             }
         }
 
