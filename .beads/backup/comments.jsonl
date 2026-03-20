@@ -10,3 +10,14 @@
 {"author":"Craig Russell Tiu","created_at":"2026-03-20T06:57:54Z","id":"019d0a09-4e33-7cd7-a488-5737e3825535","issue_id":"dispatch-k8d","text":"Please don't worry about cargo build/test/check — the code won't compile yet and that's expected."}
 {"author":"Craig Russell Tiu","created_at":"2026-03-20T06:58:02Z","id":"019d0a09-6a7a-7590-b255-464be2e0789c","issue_id":"dispatch-qwd","text":"Please don't worry about cargo build/test/check — the code won't compile yet and that's expected."}
 {"author":"Craig Russell Tiu","created_at":"2026-03-20T06:58:10Z","id":"019d0a09-8992-7861-a941-e073e347e8b5","issue_id":"dispatch-zec","text":"Please don't worry about cargo build/test/check — the code won't compile yet and that's expected."}
+{"author":"Craig Russell Tiu","created_at":"2026-03-20T08:57:39Z","id":"019d0a76-f1d6-732c-ab76-a1304379af60","issue_id":"dispatch-03s","text":"Don't run cargo build/test/check"}
+{"author":"Craig Russell Tiu","created_at":"2026-03-20T08:57:53Z","id":"019d0a77-2798-7c40-a911-5d126f4ff2d0","issue_id":"dispatch-0ci","text":"Don't run cargo build/test/check"}
+{"author":"Craig Russell Tiu","created_at":"2026-03-20T08:58:03Z","id":"019d0a77-4fc1-73c7-b305-34edda5ba808","issue_id":"dispatch-3tr","text":"Don't run cargo build/test/check"}
+{"author":"Craig Russell Tiu","created_at":"2026-03-20T08:58:23Z","id":"019d0a77-a070-7161-9572-52de453d9dd8","issue_id":"dispatch-bka","text":"Don't run cargo build/test/check"}
+{"author":"Craig Russell Tiu","created_at":"2026-03-20T08:58:56Z","id":"019d0a78-2546-754d-85b3-c6eb76628c79","issue_id":"dispatch-boa","text":"Don't run cargo build/test/check"}
+{"author":"Craig Russell Tiu","created_at":"2026-03-20T08:59:23Z","id":"019d0a78-89d9-72f2-b83c-f2dd8778168e","issue_id":"dispatch-guj","text":"Don't run cargo build/test/check"}
+{"author":"Craig Russell Tiu","created_at":"2026-03-20T08:59:39Z","id":"019d0a78-c57a-7e5c-97cb-c0ee5c271e13","issue_id":"dispatch-ov4","text":"Don't run cargo build/test/check"}
+{"author":"Craig Russell Tiu","created_at":"2026-03-20T08:59:52Z","id":"019d0a78-f3ef-7917-9821-2a067f902f86","issue_id":"dispatch-w4s","text":"Don't run cargo build/test/check"}
+{"author":"Craig Russell Tiu","created_at":"2026-03-20T09:00:01Z","id":"019d0a79-1879-7002-b42d-859b34c5193c","issue_id":"dispatch-84f","text":"Don't run cargo build/test/check"}
+{"author":"Craig Russell Tiu","created_at":"2026-03-20T09:00:07Z","id":"019d0a79-2d60-7f2b-b642-0425ea405048","issue_id":"dispatch-lgx","text":"Don't run cargo build/test/check"}
+{"author":"Craig Russell Tiu","created_at":"2026-03-20T09:00:14Z","id":"019d0a79-5094-7839-9cfe-3e54bbb3ae6a","issue_id":"dispatch-1vl","text":"Don't run cargo build/test/check"}
