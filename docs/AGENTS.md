@@ -82,3 +82,4 @@ If the merge fails due to conflicts, resolve them:
 - Always push to remote after merging into main.
 - Create your own worktree at the start and clean it up at the end.
 - Commit all changes before merging.
+- NEVER kill, stop, or restart the dispatch process. You are running inside it — killing it kills you and all other agents.
