@@ -19,6 +19,8 @@ pub enum WsEvent {
     InvalidPsk { addr: String },
     /// Image sent from radio, targeted at a specific agent by callsign.
     ImageReceived { callsign: String, data: String, filename: String },
+    /// Interrupt the orchestrator (cancel current response).
+    Interrupt,
 }
 
 // --- Agent state ---------------------------------------------------------
@@ -387,6 +389,14 @@ pub fn handle_message(raw: RawInbound, state: &SharedState) -> Option<OutboundMs
         "radio_status" => {
             // Consumed for state tracking; no response needed.
             let _state_str = raw.state.as_deref().unwrap_or("idle");
+            None
+        }
+
+        "interrupt" => {
+            let st = state.lock().unwrap();
+            if let Some(tx) = &st.event_tx {
+                let _ = tx.send(WsEvent::Interrupt);
+            }
             None
         }
 

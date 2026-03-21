@@ -584,6 +584,7 @@ While in input mode, `Escape` is the only key intercepted by the console -- it i
 | `Right`             | Next page                                                  |
 | `Left`              | Previous page                                              |
 | `n`               | Spawn new agent in empty targeted slot (next available callsign) |
+| `c`               | Interrupt orchestrator (cancel current response, restart)     |
 | `k`               | Kill agent in currently targeted slot (confirms first)       |
 | `o`               | Toggle orchestrator view (replaces agent grid with event log) |
 | `p`               | Show/hide full PSK                                           |

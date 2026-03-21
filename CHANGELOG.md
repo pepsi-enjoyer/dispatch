@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.3.7
+
+### Added
+
+- Orchestrator interrupt: press `c` in the console or tap the stop button on the radio to cancel the orchestrator's current response and restart it.
+
 ## v0.3.6
 
 ### Changed

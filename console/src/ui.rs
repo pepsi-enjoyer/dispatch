@@ -500,7 +500,7 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             } else if target_empty {
                 " n:new  o:orch  ?:help  q:quit"
             } else {
-                " Enter:input  ←→:page  x:info  p:psk  k:kill  o:orch  ?:help  q:quit"
+                " Enter:input  ←→:page  c:stop  k:kill  o:orch  ?:help  q:quit"
             };
             Line::from(vec![
                 Span::styled(
@@ -544,7 +544,7 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 pub fn render_help_overlay(f: &mut Frame, area: Rect) {
-    let r = centered_rect(52, 22, area);
+    let r = centered_rect(52, 23, area);
     f.render_widget(Clear, r);
     let lines = vec![
         Line::from(Span::styled(
@@ -560,6 +560,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::raw("  PgUp / PgDn  Scroll output")),
         Line::from(Span::raw("  ↑ / ↓        Scroll orchestrator view")),
         Line::from(Span::raw("  n            New agent in empty slot")),
+        Line::from(Span::raw("  c            Interrupt orchestrator")),
         Line::from(Span::raw("  k            Kill target agent")),
         Line::from(Span::raw("  o            Toggle orchestrator view")),
         Line::from(Span::raw("  p            Toggle PSK visibility")),

@@ -248,6 +248,12 @@ impl Orchestrator {
         self.state = OrchestratorState::Dead;
     }
 
+    /// Interrupt the current response: kill the process and clear pending queue.
+    pub fn interrupt(&mut self) {
+        self.pending.clear();
+        self.kill();
+    }
+
     /// Check if the orchestrator is alive.
     pub fn is_alive(&self) -> bool {
         self.state != OrchestratorState::Dead

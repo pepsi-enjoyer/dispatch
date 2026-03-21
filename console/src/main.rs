@@ -193,14 +193,22 @@ fn main() -> io::Result<()> {
     let orch_user_callsign = cfg.identity.user_callsign.clone();
     let orch_console_name = cfg.identity.console_name.clone();
     let (orch_ready_tx, orch_ready_rx) = mpsc::channel::<orchestrator::Orchestrator>();
-    thread::spawn(move || {
-        let repo_refs: Vec<&str> = orch_repos.iter().map(|s| s.as_str()).collect();
-        let tool_defs = tools::tool_definitions();
-        let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &orch_callsigns, &orch_user_callsign, &orch_console_name);
-        if let Some(orch) = orchestrator::spawn(&system_prompt, &orch_cwd) {
-            let _ = orch_ready_tx.send(orch);
-        }
-    });
+    {
+        let tx = orch_ready_tx.clone();
+        let repos = orch_repos.clone();
+        let cwd = orch_cwd.clone();
+        let cs = orch_callsigns.clone();
+        let uc = orch_user_callsign.clone();
+        let cn = orch_console_name.clone();
+        thread::spawn(move || {
+            let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
+            let tool_defs = tools::tool_definitions();
+            let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn);
+            if let Some(orch) = orchestrator::spawn(&system_prompt, &cwd) {
+                let _ = tx.send(orch);
+            }
+        });
+    }
     app.push_ticker("ORCHESTRATOR: starting...".to_string());
 
     // dispatch-sa1: show multi-repo indicator if applicable.
@@ -395,6 +403,29 @@ fn main() -> io::Result<()> {
                     } else {
                         app.push_ticker("IMAGE ERROR: invalid base64 data".to_string());
                     }
+                }
+                ws_server::WsEvent::Interrupt => {
+                    if let Some(orch) = &mut app.orchestrator {
+                        orch.interrupt();
+                    }
+                    app.orchestrator = None;
+                    app.push_ticker("ORCHESTRATOR: interrupted — restarting...".to_string());
+                    app.push_chat("System", "Orchestrator interrupted. Restarting...");
+                    // Respawn in background.
+                    let tx = orch_ready_tx.clone();
+                    let repos = orch_repos.clone();
+                    let cwd = orch_cwd.clone();
+                    let cs = orch_callsigns.clone();
+                    let uc = orch_user_callsign.clone();
+                    let cn = orch_console_name.clone();
+                    thread::spawn(move || {
+                        let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
+                        let tool_defs = tools::tool_definitions();
+                        let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn);
+                        if let Some(orch) = orchestrator::spawn(&system_prompt, &cwd) {
+                            let _ = tx.send(orch);
+                        }
+                    });
                 }
             }
         }
@@ -754,6 +785,33 @@ fn main() -> io::Result<()> {
                                     let target_g = app.target_global();
                                     if app.slots[target_g].is_some() {
                                         app.overlay = Overlay::ConfirmTerminate;
+                                    }
+                                }
+
+                                // Interrupt orchestrator (cancel current response)
+                                KeyCode::Char('c') => {
+                                    if let Some(orch) = &mut app.orchestrator {
+                                        if orch.state == orchestrator::OrchestratorState::Responding {
+                                            orch.interrupt();
+                                            app.orchestrator = None;
+                                            app.push_ticker("ORCHESTRATOR: interrupted — restarting...".to_string());
+                                            app.push_chat("System", "Orchestrator interrupted. Restarting...");
+                                            // Respawn in background.
+                                            let tx = orch_ready_tx.clone();
+                                            let repos = orch_repos.clone();
+                                            let cwd = orch_cwd.clone();
+                                            let cs = orch_callsigns.clone();
+                                            let uc = orch_user_callsign.clone();
+                                            let cn = orch_console_name.clone();
+                                            thread::spawn(move || {
+                                                let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
+                                                let tool_defs = tools::tool_definitions();
+                                                let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn);
+                                                if let Some(orch) = orchestrator::spawn(&system_prompt, &cwd) {
+                                                    let _ = tx.send(orch);
+                                                }
+                                            });
+                                        }
                                     }
                                 }
 
