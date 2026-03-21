@@ -24,7 +24,7 @@ Turn your Android phone into a push-to-talk radio that dispatches AI coding agen
 
 **Dispatch Radio** (Android) -- a push-to-talk app controlled by hardware volume buttons. Hold Volume Down to speak; the app transcribes speech and sends it to the console over a TLS-encrypted WebSocket on your local network.
 
-<img width="300" height="3088" alt="image" src="https://github.com/user-attachments/assets/4b877d5f-8b09-4a95-8a21-b4e182bccb9a" />
+<img width="400" height="2209" alt="image" src="https://github.com/user-attachments/assets/d3ea073c-1643-493d-98fd-95624d623fee" />
 
 ## How It Works
 
