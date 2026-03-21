@@ -19,10 +19,6 @@ import com.dispatch.radio.model.Agent
  */
 class AgentStatusOverlay(private val context: Context) {
 
-    companion object {
-        private val MONO_BOLD = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-    }
-
     private var dialog: AlertDialog? = null
 
     fun show(agents: List<Agent>) {
@@ -33,6 +29,15 @@ class AgentStatusOverlay(private val context: Context) {
         val layout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 24, 48, 24)
+        }
+
+        // Monospace title matching the app's font (AlertDialog.setTitle uses sans-serif)
+        val titleView = TextView(context).apply {
+            text = "AGENT STATUS"
+            setTextColor(Color.WHITE)
+            textSize = 18f
+            typeface = Typeface.MONOSPACE
+            setPadding(48, 36, 48, 12)
         }
 
         if (active.isEmpty()) {
@@ -53,7 +58,7 @@ class AgentStatusOverlay(private val context: Context) {
                     text = agent.callsign
                     setTextColor(Color.WHITE)
                     textSize = 18f
-                    typeface = MONO_BOLD
+                    typeface = Typeface.MONOSPACE
                     layoutParams = LinearLayout.LayoutParams(
                         0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
                     )
@@ -69,7 +74,7 @@ class AgentStatusOverlay(private val context: Context) {
                     text = agent.status.replaceFirstChar { it.uppercase() }
                     setTextColor(statusColor)
                     textSize = 18f
-                    typeface = MONO_BOLD
+                    typeface = Typeface.MONOSPACE
                     gravity = Gravity.END
                 })
 
@@ -78,7 +83,7 @@ class AgentStatusOverlay(private val context: Context) {
         }
 
         dialog = AlertDialog.Builder(context, R.style.Theme_DispatchRadio_Dialog)
-            .setTitle("AGENT STATUS")
+            .setCustomTitle(titleView)
             .setView(layout)
             .setCancelable(false)
             .create()
