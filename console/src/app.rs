@@ -356,7 +356,7 @@ impl App {
                 self.push_ticker(format!(
                     "DISPATCH: {} (slot {})", callsign, slot_idx + 1
                 ));
-                self.push_chat("System", &format!("Dispatched agent {} to slot {}.", callsign, slot_idx + 1));
+                self.push_chat("System", &format!("Dispatched {} to slot {}: {}", callsign, slot_idx + 1, prompt));
 
                 // Sync ws_state.
                 {
