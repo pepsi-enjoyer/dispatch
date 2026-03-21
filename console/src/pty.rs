@@ -24,7 +24,7 @@ pub const DISPATCH_MSG_MARKER: &str = "@@DISPATCH_MSG:";
 fn check_dispatch_marker(
     line_buf: &[u8],
     marker: &str,
-    last_msg: &mut String,
+    sent_msgs: &mut std::collections::HashSet<String>,
     tx: &std::sync::mpsc::Sender<(usize, String)>,
     slot_idx: usize,
 ) {
@@ -50,8 +50,8 @@ fn check_dispatch_marker(
                 return;
             }
             let msg = util::clean_dispatch_msg(&line[pos + marker.len()..]);
-            if !msg.is_empty() && msg != *last_msg {
-                *last_msg = msg.clone();
+            if !msg.is_empty() && !sent_msgs.contains(&msg) {
+                sent_msgs.insert(msg.clone());
                 let _ = tx.send((slot_idx, msg));
             }
         }
@@ -172,7 +172,7 @@ pub fn dispatch_slot(
         let mut child = child;
         let mut buf = [0u8; 4096];
         let mut line_buf: Vec<u8> = Vec::with_capacity(512);
-        let mut last_msg = String::new();
+        let mut sent_msgs = std::collections::HashSet::new();
         // Track whether the last byte was \r so we can distinguish
         // \r\n (normal line ending) from bare \r (terminal redraw).
         let mut cr_pending = false;
@@ -200,14 +200,14 @@ pub fn dispatch_slot(
                             cr_pending = false;
                             if byte == b'\n' {
                                 // \r\n — normal line ending. Process the buffer.
-                                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut last_msg, &agent_msg_tx, global_idx);
+                                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &agent_msg_tx, global_idx);
                                 line_buf.clear();
                                 continue;
                             }
                             if byte == b'\r' {
                                 // \r\r — the first \r was a real line ending;
                                 // process the buffer, then track this new \r.
-                                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut last_msg, &agent_msg_tx, global_idx);
+                                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &agent_msg_tx, global_idx);
                                 line_buf.clear();
                                 cr_pending = true;
                                 continue;
@@ -217,7 +217,7 @@ pub fn dispatch_slot(
                             // renderers (Ink/ConPTY) may write the marker then
                             // reposition the cursor with \r in the same pass.
                             // Dedup (last_msg) prevents duplicate emissions.
-                            check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut last_msg, &agent_msg_tx, global_idx);
+                            check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &agent_msg_tx, global_idx);
                             line_buf.clear();
                             // Fall through to handle the current byte.
                         }
@@ -225,7 +225,7 @@ pub fn dispatch_slot(
                             cr_pending = true;
                         } else if byte == b'\n' {
                             // Bare \n — process the line.
-                            check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut last_msg, &agent_msg_tx, global_idx);
+                            check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &agent_msg_tx, global_idx);
                             line_buf.clear();
                         } else {
                             line_buf.push(byte);
@@ -312,11 +312,11 @@ mod tests {
 
     fn run_marker_check(line: &str) -> Option<String> {
         let (tx, rx) = mpsc::channel();
-        let mut last_msg = String::new();
+        let mut sent_msgs = std::collections::HashSet::new();
         check_dispatch_marker(
             line.as_bytes(),
             DISPATCH_MSG_MARKER,
-            &mut last_msg,
+            &mut sent_msgs,
             &tx,
             0,
         );
@@ -376,10 +376,10 @@ mod tests {
     #[test]
     fn dedup_prevents_same_message_twice() {
         let (tx, rx) = mpsc::channel();
-        let mut last_msg = String::new();
+        let mut sent_msgs = std::collections::HashSet::new();
         let line = b"@@DISPATCH_MSG:Task received.";
-        check_dispatch_marker(line, DISPATCH_MSG_MARKER, &mut last_msg, &tx, 0);
-        check_dispatch_marker(line, DISPATCH_MSG_MARKER, &mut last_msg, &tx, 0);
+        check_dispatch_marker(line, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
+        check_dispatch_marker(line, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
         // Only one message should be sent.
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_err());
@@ -408,29 +408,29 @@ mod tests {
     fn simulate_pty_bytes(input: &[u8]) -> Vec<String> {
         let (tx, rx) = mpsc::channel();
         let mut line_buf: Vec<u8> = Vec::with_capacity(512);
-        let mut last_msg = String::new();
+        let mut sent_msgs = std::collections::HashSet::new();
         let mut cr_pending = false;
         for &byte in input {
             if cr_pending {
                 cr_pending = false;
                 if byte == b'\n' {
-                    check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut last_msg, &tx, 0);
+                    check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
                     line_buf.clear();
                     continue;
                 }
                 if byte == b'\r' {
-                    check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut last_msg, &tx, 0);
+                    check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
                     line_buf.clear();
                     cr_pending = true;
                     continue;
                 }
-                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut last_msg, &tx, 0);
+                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
                 line_buf.clear();
             }
             if byte == b'\r' {
                 cr_pending = true;
             } else if byte == b'\n' {
-                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut last_msg, &tx, 0);
+                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
                 line_buf.clear();
             } else {
                 line_buf.push(byte);
@@ -485,6 +485,36 @@ mod tests {
         let input = b"echo \"@@DISPATCH_MSG:Task received.\"\r\n@@DISPATCH_MSG:Task received.\r\n";
         let msgs = simulate_pty_bytes(input);
         assert_eq!(msgs, vec!["Task received."]);
+    }
+
+    #[test]
+    fn tui_redraw_cycling_messages_deduped() {
+        // When a TUI (Ink) re-renders, it outputs the full terminal content
+        // again, including previous @@DISPATCH_MSG markers. With multiple
+        // different messages (A, B, C), they cycle on each redraw. The
+        // HashSet-based dedup must prevent re-emission even when different
+        // messages interleave (which defeated the old last_msg == check).
+        let mut input = Vec::new();
+        // First render: three distinct messages.
+        input.extend_from_slice(b"@@DISPATCH_MSG:Task received.\r\n");
+        input.extend_from_slice(b"@@DISPATCH_MSG:Working on fix.\r\n");
+        input.extend_from_slice(b"@@DISPATCH_MSG:Done. Fixed the bug.\r\n");
+        // Second render (TUI redraw): same three messages again.
+        input.extend_from_slice(b"@@DISPATCH_MSG:Task received.\r\n");
+        input.extend_from_slice(b"@@DISPATCH_MSG:Working on fix.\r\n");
+        input.extend_from_slice(b"@@DISPATCH_MSG:Done. Fixed the bug.\r\n");
+        // Third render: same again.
+        input.extend_from_slice(b"@@DISPATCH_MSG:Task received.\r\n");
+        input.extend_from_slice(b"@@DISPATCH_MSG:Working on fix.\r\n");
+        input.extend_from_slice(b"@@DISPATCH_MSG:Done. Fixed the bug.\r\n");
+
+        let msgs = simulate_pty_bytes(&input);
+        // Each message should appear exactly once despite three re-renders.
+        assert_eq!(msgs, vec![
+            "Task received.",
+            "Working on fix.",
+            "Done. Fixed the bug.",
+        ]);
     }
 }
 
