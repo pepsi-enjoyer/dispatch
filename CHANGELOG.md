@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.3.8
+
+### Fixed
+
+- Collapsible system messages in the radio app now work with multi-line dispatch prompts. The previous regex-based matching failed when prompts contained newlines; replaced with startsWith/contains checks.
+
+### Changed
+
+- User (Dispatch) messages in the radio chat that are multi-line or longer than 80 characters are now also collapsible, matching the system message behavior.
+
 ## v0.3.7
 
 ### Added
