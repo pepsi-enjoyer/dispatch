@@ -9,10 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 
 - Collapsible system messages in the radio app now work with multi-line dispatch prompts. The previous regex-based matching failed when prompts contained newlines; replaced with startsWith/contains checks.
+- Volume Up agent status overlay no longer flickers when held. The dialog now uses FLAG_NOT_FOCUSABLE so it doesn't steal input focus from the activity, allowing key-up events to properly dismiss it.
 
 ### Changed
 
 - User (Dispatch) messages in the radio chat that are multi-line or longer than 80 characters are now also collapsible, matching the system message behavior.
+- Agent status overlay font changed to monospace bold, consistent with the rest of the radio app.
+- Volume Up long press (>1s) no longer transitions to quick dispatch picker. The status overlay now stays visible for the entire hold duration.
 
 ## v0.3.7
 
