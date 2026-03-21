@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.3.4
+
+### Added
+
+- Manual agent spawn keybinding: press `n` in command mode on an empty slot to launch a new agent. The agent is automatically assigned the next available callsign from the configured list, skipping any callsigns already in use. The standby pane now hints about this keybinding, and the footer shows context-sensitive hints (`n:new` for empty slots, `k:kill` for occupied ones).
+
 ## v0.3.3
 
 ### Added

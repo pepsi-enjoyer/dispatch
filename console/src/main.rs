@@ -713,6 +713,42 @@ fn main() -> io::Result<()> {
                                     }
                                 }
 
+                                // Spawn new agent in empty target slot
+                                KeyCode::Char('n') => {
+                                    let target_g = app.target_global();
+                                    if app.slots[target_g].is_none() {
+                                        let cs = app.next_callsign().unwrap_or_else(|| format!("Agent-{}", target_g + 1));
+                                        let repo = app.default_repo_root().to_string();
+                                        let cmd = app.tool_cmd("claude-code").to_string();
+                                        if let Some(slot) = pty::dispatch_slot(
+                                            target_g, "claude-code", &cmd, app.pane_rows, app.pane_cols,
+                                            None, app.scrollback_lines,
+                                            util::repo_name_from_path(&repo), &repo,
+                                            None,
+                                            app.agent_msg_tx.clone(),
+                                            &cs,
+                                        ) {
+                                            let name = slot.display_name().to_string();
+                                            app.push_orch(OrchestratorEventKind::Dispatched { agent: name.clone(), slot: target_g + 1, tool: "claude-code".to_string() });
+                                            app.push_ticker(format!("DISPATCH: {} launched in slot {}", name, target_g + 1));
+                                            app.push_chat("System", &format!("Dispatched agent {} to slot {}.", name, target_g + 1));
+                                            app.slots[target_g] = Some(slot);
+                                            // Sync ws_state.
+                                            {
+                                                let mut st = app.ws_state.lock().unwrap();
+                                                st.slots[target_g] = Some(ws_server::AgentSlot {
+                                                    callsign: name.clone(),
+                                                    tool: "claude-code".to_string(),
+                                                    status: ws_server::AgentStatus::Idle,
+                                                    task: None,
+                                                    repo: Some(util::repo_name_from_path(&repo).to_string()),
+                                                });
+                                            }
+                                            app.broadcast_agents();
+                                        }
+                                    }
+                                }
+
                                 // Terminate target agent
                                 KeyCode::Char('k') => {
                                     let target_g = app.target_global();
