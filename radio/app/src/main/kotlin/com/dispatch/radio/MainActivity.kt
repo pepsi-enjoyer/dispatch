@@ -44,6 +44,10 @@ class MainActivity : AppCompatActivity() {
     private var currentSlot: Int = -1
     private var queuedTasks: Int = 0
 
+    // Identity names from console config
+    private var userCallsign: String = "Dispatch"
+    private var consoleName: String = "Console"
+
     // Chat log (dispatch-chat)
     private var chatMessageCount: Int = 0
 
@@ -329,6 +333,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 currentSlot = json.get("target")?.takeUnless { it.isJsonNull }?.asInt ?: currentSlot
                 queuedTasks = json.get("queued_tasks")?.takeUnless { it.isJsonNull }?.asInt ?: 0
+                // Extract identity names from console config
+                json.get("user_callsign")?.takeUnless { it.isJsonNull }?.asString?.let { userCallsign = it }
+                json.get("console_name")?.takeUnless { it.isJsonNull }?.asString?.let { consoleName = it }
                 // UI state updated — agents/target/queued tracked internally for volume key handling
             }
             "target_changed" -> {
@@ -357,11 +364,11 @@ class MainActivity : AppCompatActivity() {
             chatMessageCount--
         }
 
-        val displayName = if (sender == "Dispatcher") "Console" else sender
+        val displayName = sender
 
         val colorInt = when (sender) {
-            "You" -> getColor(R.color.red)
-            "Dispatcher" -> getColor(R.color.green)
+            userCallsign -> getColor(R.color.red)
+            consoleName -> getColor(R.color.green)
             "System" -> getColor(R.color.dim_grey)
             else -> callsignColor(sender) // Distinct color per agent callsign
         }

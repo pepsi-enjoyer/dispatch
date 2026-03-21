@@ -29,13 +29,42 @@ pub struct AgentsConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct IdentityConfig {
+    /// Display name for the user (shown in chat log and used in prompts).
+    /// Default: "Dispatch".
+    #[serde(default = "default_user_callsign")]
+    pub user_callsign: String,
+    /// Display name for the console/orchestrator (shown in chat log and used in prompts).
+    /// Default: "Console".
+    #[serde(default = "default_console_name")]
+    pub console_name: String,
+}
+
+fn default_user_callsign() -> String {
+    "Dispatch".to_string()
+}
+
+fn default_console_name() -> String {
+    "Console".to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     pub auth: AuthConfig,
     pub terminal: TerminalConfig,
     #[serde(default)]
     pub agents: Option<AgentsConfig>,
+    #[serde(default = "default_identity")]
+    pub identity: IdentityConfig,
     pub tools: HashMap<String, String>,
+}
+
+fn default_identity() -> IdentityConfig {
+    IdentityConfig {
+        user_callsign: default_user_callsign(),
+        console_name: default_console_name(),
+    }
 }
 
 impl Config {
@@ -79,6 +108,7 @@ impl Default for Config {
             agents: Some(AgentsConfig {
                 callsigns: default_callsigns(),
             }),
+            identity: default_identity(),
             tools,
         }
     }
@@ -225,6 +255,12 @@ fn to_toml_with_comments(cfg: &Config) -> String {
          # Pages are allocated automatically (4 slots per page).\n\
          callsigns = [{callsigns}]\n\
          \n\
+         [identity]\n\
+         # Display name for the user (shown in chat log and used in prompts).\n\
+         user_callsign = \"{user_callsign}\"\n\
+         # Display name for the console/orchestrator.\n\
+         console_name = \"{console_name}\"\n\
+         \n\
          [tools]\n\
          {tools}",
         port = cfg.server.port,
@@ -232,6 +268,8 @@ fn to_toml_with_comments(cfg: &Config) -> String {
         psk = cfg.auth.psk,
         scrollback = cfg.terminal.scrollback_lines,
         callsigns = callsigns_str,
+        user_callsign = cfg.identity.user_callsign,
+        console_name = cfg.identity.console_name,
         tools = tools_lines,
     )
 }

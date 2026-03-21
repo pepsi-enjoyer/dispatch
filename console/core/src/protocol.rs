@@ -61,6 +61,12 @@ pub enum OutboundMsg {
         slots: Vec<SlotInfo>,
         target: Option<u32>,
         queued_tasks: u32,
+        /// Configured display name for the user (default: "Dispatch").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_callsign: Option<String>,
+        /// Configured display name for the console/orchestrator (default: "Console").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        console_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
     },
@@ -105,7 +111,7 @@ pub enum OutboundMsg {
     },
     /// Unsolicited chat message pushed to all connected clients.
     Chat {
-        /// Sender label (e.g. "Dispatcher", "Alpha", "System").
+        /// Sender label (e.g. "Console", "Alpha", "System").
         sender: String,
         /// Chat message text.
         text: String,
