@@ -404,14 +404,14 @@ impl App {
             }
 
             // Agents merge their own branches; this acknowledges the completion.
-            tools::ToolCall::Merge { task_id } => {
-                self.push_orch(OrchestratorEventKind::Merged { id: task_id.clone() });
-                self.push_ticker(format!("MERGED: {}", task_id));
-                self.push_chat("System", &format!("{} merged.", task_id));
+            tools::ToolCall::Merge { agent } => {
+                self.push_orch(OrchestratorEventKind::Merged { id: agent.clone() });
+                self.push_ticker(format!("MERGED: {}", agent));
+                self.push_chat("System", &format!("{} has merged to remote.", agent));
                 tools::ToolResult::Merged {
-                    task_id: task_id.clone(),
+                    agent: agent.clone(),
                     success: true,
-                    message: format!("{} merged by agent", task_id),
+                    message: format!("{} merged by agent", agent),
                 }
             }
 

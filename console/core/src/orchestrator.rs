@@ -325,8 +325,8 @@ fn parse_action_json(json_str: &str) -> Result<tools::ToolCall, serde_json::Erro
             Ok(tools::ToolCall::Terminate { agent })
         }
         "merge" => {
-            let task_id = v.get("task_id").and_then(|t| t.as_str()).unwrap_or("").to_string();
-            Ok(tools::ToolCall::Merge { task_id })
+            let agent = v.get("agent").and_then(|a| a.as_str()).unwrap_or("").to_string();
+            Ok(tools::ToolCall::Merge { agent })
         }
         "list_agents" => Ok(tools::ToolCall::ListAgents),
         "list_repos" => Ok(tools::ToolCall::ListRepos),

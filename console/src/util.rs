@@ -99,6 +99,16 @@ pub fn clean_dispatch_msg(s: &str) -> String {
     // Strip trailing quote characters left over from shell command echo
     // (e.g. `echo "@@DISPATCH_MSG:msg"` output may include trailing `"`).
     let out = out.trim_end_matches('"').trim_end_matches('\'');
+    // Strip any trailing non-punctuation characters that follow the last
+    // sentence-ending punctuation — these are terminal noise (e.g. "now.U").
+    let out = out.trim();
+    if let Some(end) = out.rfind(|c| c == '.' || c == '!' || c == '?') {
+        // Only truncate if the trailing chars are short (noise), not a whole word.
+        let tail = &out[end + 1..];
+        if !tail.is_empty() && tail.len() <= 3 && tail.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return out[..=end].trim().to_string();
+        }
+    }
     out.trim().to_string()
 }
 

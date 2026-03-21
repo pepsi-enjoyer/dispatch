@@ -7,7 +7,7 @@
 // Tools:
 //   dispatch(repo, prompt, callsign?) — dispatch an agent with a prompt
 //   terminate(agent)                  — kill agent by callsign or slot number
-//   merge(task_id)                    — acknowledge a completed merge
+//   merge(agent)                      — acknowledge a completed merge
 //   list_agents()                     — get all agent slot states
 //   list_repos()                      — list known repositories
 //   message_agent(agent, text)        — send text to an agent's PTY
@@ -38,8 +38,8 @@ pub enum ToolCall {
     },
     /// Acknowledge a completed merge.
     Merge {
-        /// Task ID (e.g. "t1").
-        task_id: String,
+        /// Agent callsign (e.g. "Alpha").
+        agent: String,
     },
     /// List all agent slots and their current state.
     ListAgents,
@@ -92,7 +92,7 @@ pub enum ToolResult {
     },
     /// Merge result.
     Merged {
-        task_id: String,
+        agent: String,
         success: bool,
         message: String,
     },
@@ -163,12 +163,12 @@ pub fn tool_definitions() -> serde_json::Value {
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "task_id": {
+                    "agent": {
                         "type": "string",
-                        "description": "The task ID to merge (e.g. \"t1\")."
+                        "description": "Agent callsign (e.g. \"Alpha\")."
                     }
                 },
-                "required": ["task_id"]
+                "required": ["agent"]
             }
         },
         {
@@ -322,10 +322,10 @@ mod tests {
 
     #[test]
     fn parse_merge_call() {
-        let text = r#"<tool_call>{"name": "merge", "input": {"task_id": "t1"}}</tool_call>"#;
+        let text = r#"<tool_call>{"name": "merge", "input": {"agent": "Alpha"}}</tool_call>"#;
         let call = parse_tool_call(text).unwrap();
         match call {
-            ToolCall::Merge { task_id } => assert_eq!(task_id, "t1"),
+            ToolCall::Merge { agent } => assert_eq!(agent, "Alpha"),
             _ => panic!("expected Merge"),
         }
     }
