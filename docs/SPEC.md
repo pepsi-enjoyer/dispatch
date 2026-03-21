@@ -49,10 +49,21 @@ dispatch/
 sample-repo/
   .dispatch/
     .worktrees/        # Git worktrees for active agents
+    MEMORY.md          # Shared agent memory (persistent knowledge base)
   (repo's own files)
 ```
 
 The `.dispatch/` directory is gitignored by the console on first run.
+
+### Shared Agent Memory
+
+The console maintains a shared memory file at `.dispatch/MEMORY.md` in each target repo. This file persists knowledge across agent sessions -- build commands, architectural gotchas, environment quirks, and lessons learned.
+
+**Reading**: When an agent is dispatched, the console reads `.dispatch/MEMORY.md` and appends its contents to the agent's system prompt. Agents benefit from prior learnings without any extra steps.
+
+**Writing**: Agents are instructed (via `docs/AGENTS.md`) to append valuable learnings to the memory file after completing their work. Only high-value knowledge is written -- not routine observations.
+
+**Lifecycle**: The memory file is created with an empty template on first agent dispatch. It is never automatically pruned. The file lives in `.dispatch/` (gitignored) so it persists locally across sessions but is not committed to the repository.
 
 ---
 
