@@ -83,3 +83,18 @@ If the merge fails due to conflicts, resolve them:
 - Create your own worktree at the start and clean it up at the end.
 - Commit all changes before merging.
 - NEVER kill, stop, or restart the console process. You are running inside it — killing it kills you and all other agents.
+
+## Shared Memory
+
+A shared memory file at `.dispatch/MEMORY.md` (in the repo root) persists knowledge across agents. Its current contents are included in the "Shared Memory" section of your instructions above (if any prior agents have written to it).
+
+**When to update**: After merging your branch and before returning to the prompt, if you learned something that would help future agents, update `.dispatch/MEMORY.md` in the repo root. Only write genuinely valuable knowledge that would save a future agent significant time:
+
+- Build or test commands that aren't obvious from the project files
+- Architectural gotchas that caused you trouble
+- Environment quirks or workarounds you discovered
+- Common mistakes to avoid
+
+**How to update**: Add concise bullet points (1-2 lines each) under the appropriate section (`Build & Test`, `Gotchas`, or `Notes`). Do not rewrite or reorganize existing content -- only append new entries.
+
+**When NOT to update**: Most tasks don't need a memory update. Skip it if you didn't learn anything that a future agent wouldn't already know from reading the code.

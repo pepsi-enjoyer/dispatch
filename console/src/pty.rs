@@ -56,6 +56,35 @@ fn check_dispatch_marker(
     }
 }
 
+/// Ensure `.dispatch/MEMORY.md` exists in the repo root with a starter template.
+/// Called before spawning an agent so shared memory is always available.
+fn ensure_memory_file(repo_root: &str) {
+    let dispatch_dir = format!("{}/.dispatch", repo_root);
+    let memory_path = format!("{}/MEMORY.md", dispatch_dir);
+    if std::path::Path::new(&memory_path).exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&dispatch_dir);
+    let template = "\
+# Shared Agent Memory
+
+Knowledge base from prior agents. Updated when agents learn something valuable.
+
+## Build & Test
+
+## Gotchas
+
+## Notes
+";
+    let _ = std::fs::write(&memory_path, template);
+}
+
+/// Read `.dispatch/MEMORY.md` from the repo root. Returns empty string if missing.
+fn read_memory_file(repo_root: &str) -> String {
+    let path = format!("{}/.dispatch/MEMORY.md", repo_root);
+    std::fs::read_to_string(&path).unwrap_or_default()
+}
+
 /// Open a PTY and spawn a process. Returns a SlotState on success.
 /// `cwd` sets the working directory for the PTY (dispatch-xje: worktree path).
 /// `initial_prompt` is passed as a CLI argument so the agent starts working immediately.
@@ -94,9 +123,20 @@ pub fn dispatch_slot(
         }
         c
     };
-    // Inject agent instructions from docs/AGENTS.md as system prompt.
+    // Ensure shared memory file exists for this repo.
+    ensure_memory_file(repo_root);
+
+    // Inject agent instructions from docs/AGENTS.md as system prompt,
+    // with shared memory appended so agents benefit from prior learnings.
     let agents_md_path = format!("{}/docs/AGENTS.md", repo_root);
-    if let Ok(instructions) = std::fs::read_to_string(&agents_md_path) {
+    if let Ok(mut instructions) = std::fs::read_to_string(&agents_md_path) {
+        let memory = read_memory_file(repo_root);
+        let memory = memory.trim();
+        if !memory.is_empty() {
+            instructions.push_str("\n\n---\n\n## Shared Memory (from prior agents)\n\n");
+            instructions.push_str(memory);
+            instructions.push('\n');
+        }
         cmd.arg("--system-prompt");
         cmd.arg(&instructions);
     }

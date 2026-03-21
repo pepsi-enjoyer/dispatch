@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.3.2
+
+### Added
+
+- Shared agent memory system: a persistent knowledge base at `.dispatch/MEMORY.md` in each target repo. The console creates the file on first dispatch and injects its contents into each agent's system prompt. Agents can append valuable learnings (build commands, gotchas, environment quirks) after completing work, benefiting all future agents in the same repo.
+
 ## v0.3.1
 
 ### Added
