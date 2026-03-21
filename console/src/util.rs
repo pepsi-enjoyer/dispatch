@@ -60,11 +60,16 @@ pub fn clean_dispatch_msg(s: &str) -> String {
                     loop {
                         match chars.next() {
                             Some(fb) if ('\x40'..='\x7e').contains(&fb) => {
-                                // Cursor movement after message content means
-                                // the terminal is positioning for unrelated
-                                // content (e.g. status bar text). Truncate.
+                                // Cursor movement after a complete sentence
+                                // means the terminal is positioning for
+                                // unrelated content (e.g. status bar text).
+                                // Only truncate when the content so far ends
+                                // with sentence-ending punctuation; mid-message
+                                // cursor repositioning (from TUI redraws) should
+                                // be skipped so the full message is preserved.
                                 if matches!(fb, 'A' | 'B' | 'C' | 'D' | 'H' | 'f')
                                     && !out.trim().is_empty()
+                                    && out.trim_end().ends_with(|c: char| c == '.' || c == '!' || c == '?')
                                 {
                                     break 'outer;
                                 }
@@ -240,6 +245,26 @@ mod tests {
         assert_eq!(
             clean_dispatch_msg("\x1b[CTask received."),
             "Task received."
+        );
+    }
+
+    #[test]
+    fn clean_dispatch_msg_skips_cursor_move_mid_message() {
+        // TUI redraws can insert cursor positioning mid-message (e.g. Ink
+        // layout repositioning). Cursor movement after non-punctuation
+        // content should NOT truncate — only after a complete sentence.
+        assert_eq!(
+            clean_dispatch_msg("Task\x1b[15;20H received. Working on it now."),
+            "Task received. Working on it now."
+        );
+    }
+
+    #[test]
+    fn clean_dispatch_msg_skips_cursor_move_after_partial_word() {
+        // Cursor movement after a partial word (no punctuation) should not truncate.
+        assert_eq!(
+            clean_dispatch_msg("Working\x1b[10C on the fix."),
+            "Working on the fix."
         );
     }
 }
