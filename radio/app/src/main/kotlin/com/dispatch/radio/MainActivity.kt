@@ -352,11 +352,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Check if a system message is a prompt/task message that should be collapsible. */
-    private fun isPromptMessage(sender: String, text: String): Boolean {
-        if (sender != "System") return false
-        return text.matches(Regex("^Dispatched .+ to slot \\d+: .+")) ||
-               text.matches(Regex("^\\[to .+\\] .+"))
+    /** Check if a chat message should be collapsible (collapsed by default, expand on tap). */
+    private fun isCollapsibleMessage(sender: String, text: String): Boolean {
+        // System dispatch and send-to-agent messages contain long prompts.
+        if (sender == "System") {
+            return (text.startsWith("Dispatched ") && text.contains(" to slot ")) ||
+                   text.startsWith("[to ")
+        }
+        // User (Dispatch) messages that are multi-line or long should also collapse.
+        if (sender == userCallsign) {
+            return text.contains("\n") || text.length > 80
+        }
+        return false
     }
 
     // dispatch-chat: add a message to the scrollable chat log
@@ -378,7 +385,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val fullText = "$timestamp $displayName: $text"
-        val isPrompt = isPromptMessage(sender, text)
+        val collapsible = isCollapsibleMessage(sender, text)
 
         val tv = TextView(this).apply {
             this.text = fullText
@@ -387,8 +394,8 @@ class MainActivity : AppCompatActivity() {
             setTextColor(colorInt)
             setPadding(0, 2, 0, 2)
 
-            // Prompt system messages are collapsed by default to save screen space.
-            if (isPrompt) {
+            // Collapsible messages show a single line by default; tap to expand/collapse.
+            if (collapsible) {
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 setOnClickListener {
