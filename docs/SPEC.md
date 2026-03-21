@@ -73,6 +73,21 @@ Agents can be renamed by the orchestrator. Custom names replace the configured d
 
 Callsigns are the primary identifier for voice commands. All agents are addressable by voice regardless of which page is currently displayed in the console.
 
+## Identity
+
+The `[identity]` section of `config.toml` configures display names for the user and the console/orchestrator:
+
+```toml
+[identity]
+user_callsign = "Dispatch"
+console_name = "Console"
+```
+
+- **user_callsign**: The user's display name. Shown in the radio chat log for voice transcripts and used in orchestrator/agent prompts to address the user. Default: `"Dispatch"`.
+- **console_name**: The console/orchestrator's display name. Shown in the radio chat log for orchestrator messages and used as the sender label for system decisions. Default: `"Console"`.
+
+Both names are propagated to the radio app via the `agents` response (fields `user_callsign` and `console_name`), so the radio can display and color-code them correctly.
+
 ---
 
 ## Voice Commands
@@ -328,12 +343,12 @@ Sent to the current target.
 **Chat (server push)**
 
 ```
-<- { "type": "chat", "sender": "Dispatcher", "text": "Dispatched agent Alpha." }
+<- { "type": "chat", "sender": "Console", "text": "Dispatched agent Alpha." }
 <- { "type": "chat", "sender": "Alpha", "text": "Merged to main." }
-<- { "type": "chat", "sender": "You", "text": "refactor the auth module" }
+<- { "type": "chat", "sender": "Dispatch", "text": "refactor the auth module" }
 ```
 
-Pushed to all connected clients whenever the orchestrator produces text or other significant events occur. Not a response to any request -- the console pushes these proactively. The `sender` field identifies who said it: `"You"` for voice transcripts, `"Dispatcher"` for orchestrator decisions, or an agent callsign (e.g. `"Alpha"`) for agent status messages.
+Pushed to all connected clients whenever the orchestrator produces text or other significant events occur. Not a response to any request -- the console pushes these proactively. The `sender` field identifies who said it: the configured `user_callsign` (default `"Dispatch"`) for voice transcripts, the configured `console_name` (default `"Console"`) for orchestrator decisions, or an agent callsign (e.g. `"Alpha"`) for agent status messages.
 
 **Agent status messages:** Agents send chat messages by echoing a special marker to their PTY: `echo "@@DISPATCH_MSG:message text"`. The console's PTY reader detects this marker in the byte stream and broadcasts it as a chat message with the agent's callsign as the sender. Agents are instructed to emit these at key workflow points (started, completed).
 
@@ -732,10 +747,10 @@ Minimal, high-contrast, dark theme. Uppercase labels, monospaced accents.
 │  └───────────────────────┘  │
 │                             │
 │  LOG                        │
-│  You: refactor the auth     │  <- scrollable chat log
-│  Dispatcher: Dispatching    │
+│  Dispatch: refactor the      │  <- scrollable chat log
+│  Console: Dispatching       │
 │    Alpha.                   │
-│  Dispatcher: Dispatched     │
+│  Console: Dispatched        │
 │    agent Alpha.             │
 │  Alpha: Merged to main.     │
 │                             │

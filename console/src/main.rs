@@ -115,7 +115,12 @@ fn main() -> io::Result<()> {
     let (chat_tx, _) = tokio::sync::broadcast::channel::<String>(256);
 
     // Start the WebSocket server with TLS (dispatch-bgz.7, dispatch-ct2.6).
-    let ws_state: ws_server::SharedState = Arc::new(Mutex::new(ws_server::ConsoleState::new(callsigns.clone())));
+    let ws_state: ws_server::SharedState = Arc::new(Mutex::new({
+        let mut state = ws_server::ConsoleState::new(callsigns.clone());
+        state.user_callsign = cfg.identity.user_callsign.clone();
+        state.console_name = cfg.identity.console_name.clone();
+        state
+    }));
     {
         let state = Arc::clone(&ws_state);
         let psk = cfg.auth.psk.clone();
@@ -175,6 +180,8 @@ fn main() -> io::Result<()> {
         chat_tx,
         agent_msg_tx,
         callsigns.clone(),
+        cfg.identity.user_callsign.clone(),
+        cfg.identity.console_name.clone(),
     );
 
     // dispatch-guj: eagerly spawn orchestrator in background so it's warm
@@ -182,11 +189,13 @@ fn main() -> io::Result<()> {
     let orch_repos: Vec<String> = app.repo_list().iter().map(|s| s.to_string()).collect();
     let orch_cwd = app.default_repo_root().to_string();
     let orch_callsigns = callsigns;
+    let orch_user_callsign = cfg.identity.user_callsign.clone();
+    let orch_console_name = cfg.identity.console_name.clone();
     let (orch_ready_tx, orch_ready_rx) = mpsc::channel::<orchestrator::Orchestrator>();
     thread::spawn(move || {
         let repo_refs: Vec<&str> = orch_repos.iter().map(|s| s.as_str()).collect();
         let tool_defs = tools::tool_definitions();
-        let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &orch_callsigns);
+        let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &orch_callsigns, &orch_user_callsign, &orch_console_name);
         if let Some(orch) = orchestrator::spawn(&system_prompt, &orch_cwd) {
             let _ = orch_ready_tx.send(orch);
         }
@@ -276,7 +285,7 @@ fn main() -> io::Result<()> {
                 ws_server::WsEvent::VoiceTranscript { text } => {
                     app.radio_state = RadioState::Connected;
                     app.push_orch(OrchestratorEventKind::VoiceTranscript { text: text.clone() });
-                    app.push_chat("You", &text);
+                    app.push_chat(&app.user_callsign.clone(), &text);
                     if let Some(orch) = &mut app.orchestrator {
                         orch.send_message(&format!("[MIC] {}", text));
                     } else {
@@ -315,7 +324,7 @@ fn main() -> io::Result<()> {
                     let chat_text = util::strip_action_blocks(&text);
                     let chat_text = chat_text.trim();
                     if !chat_text.is_empty() {
-                        app.push_chat("Dispatcher", chat_text);
+                        app.push_chat(&app.console_name.clone(), chat_text);
                     }
 
                     // Parse and execute any tool calls in the response.

@@ -55,6 +55,8 @@ pub fn build_system_prompt(
     repos: &[&str],
     _tool_defs: &serde_json::Value,
     callsigns: &[String],
+    user_callsign: &str,
+    console_name: &str,
 ) -> String {
     let repo_name = repos.first()
         .and_then(|p| std::path::Path::new(p).file_name())
@@ -66,12 +68,15 @@ pub fn build_system_prompt(
             let path = format!("{}/docs/ORCHESTRATOR.md", repo);
             std::fs::read_to_string(&path).ok()
         })
-        .unwrap_or_else(|| "You are a dispatch coordinator. Manage AI coding agents via voice commands.".to_string());
+        .unwrap_or_else(|| format!(
+            "You are {}. Coordinate AI coding agents dispatched by voice commands from {} (the user).",
+            console_name, user_callsign
+        ));
 
     let callsign_list = callsigns.join(", ");
     format!(
-        "Repository: {}\n\nAvailable agent callsigns (slot 1 through {}): {}\n\n{}",
-        repo_name, callsigns.len(), callsign_list, md_content
+        "Repository: {}\n\nThe user's callsign is: {}\nYour name (the orchestrator) is: {}\n\nAvailable agent callsigns (slot 1 through {}): {}\n\n{}",
+        repo_name, user_callsign, console_name, callsigns.len(), callsign_list, md_content
     )
 }
 
@@ -380,10 +385,13 @@ mod tests {
         let repos = vec!["/home/user/myrepo"];
         let tools = tools::tool_definitions();
         let callsigns = vec!["Alpha".to_string(), "Bravo".to_string()];
-        let prompt = build_system_prompt(&repos, &tools, &callsigns);
+        let prompt = build_system_prompt(&repos, &tools, &callsigns, "Dispatch", "Console");
         // Should always contain repo name as context prefix.
         assert!(prompt.contains("Repository: myrepo"));
         // Should list configured callsigns.
         assert!(prompt.contains("Alpha, Bravo"));
+        // Should include identity.
+        assert!(prompt.contains("Dispatch"));
+        assert!(prompt.contains("Console"));
     }
 }

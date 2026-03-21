@@ -62,7 +62,7 @@ On first run, a config file is generated with a random pre-shared key (PSK):
 
 The PSK is displayed in the console header bar. You will need it to connect the radio.
 
-Agent callsigns are configured in the `[agents]` section. See [`console/config.default.toml`](console/config.default.toml) for the full default configuration.
+Agent callsigns are configured in the `[agents]` section. The user and console display names are configurable in the `[identity]` section (`user_callsign` and `console_name`). See [`console/config.default.toml`](console/config.default.toml) for the full default configuration.
 
 ### Radio (Android)
 
@@ -130,6 +130,7 @@ Agent callsigns are configured in the `[agents]` section. See [`console/config.d
 - **Embedded terminals** -- each pane is a real PTY with full color, interactive TUI support, tab completion, and signal handling.
 - **Git worktree isolation** -- each agent works on its own branch in its own worktree. Agents run in parallel without conflicts and handle their own merging.
 - **Configurable agent names** -- agent callsigns are defined in `config.toml`. The number of entries determines slot count and page layout. Defaults to NATO phonetic alphabet (Alpha through Hotel). All agents are addressable by voice from any page.
+- **Configurable identity** -- the user and console display names are configurable in `config.toml` (`[identity]` section). These names appear in the radio chat log and in orchestrator/agent prompts. Defaults to "Dispatch" (user) and "Console" (orchestrator).
 - **LED ticker** -- a scrolling marquee shows dispatches, completions, merge results, and errors in real-time without consuming pane space.
 - **Clean target repo** -- all dispatch artifacts live in `.dispatch/` (gitignored). Your repo stays untouched.
 - **Networking** -- TLS-encrypted WebSocket with PSK authentication. mDNS auto-discovery eliminates manual IP configuration.

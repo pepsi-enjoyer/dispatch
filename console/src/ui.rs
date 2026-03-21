@@ -248,7 +248,7 @@ fn standby_body(_global_idx: usize, _app: &App) -> Vec<Line<'static>> {
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  Orchestrator dispatches agents via voice.",
+        "  Console dispatches agents via voice.",
         Style::default().fg(Color::DarkGray),
     )));
     lines

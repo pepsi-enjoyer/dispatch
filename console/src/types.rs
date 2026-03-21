@@ -161,4 +161,8 @@ pub struct App {
     pub agent_msg_tx: std::sync::mpsc::Sender<(usize, String)>,
     // Status indicator blink frame counter (pulsing REC-light effect)
     pub status_blink_frame: u16,
+    /// Display name for the user (default: "Dispatch").
+    pub user_callsign: String,
+    /// Display name for the console/orchestrator (default: "Console").
+    pub console_name: String,
 }

@@ -50,6 +50,10 @@ pub struct ConsoleState {
     task_counter: u64,
     /// Sender for PTY events; set by the main thread after startup.
     pub event_tx: Option<mpsc::Sender<WsEvent>>,
+    /// Display name for the user (default: "Dispatch").
+    pub user_callsign: String,
+    /// Display name for the console/orchestrator (default: "Console").
+    pub console_name: String,
 }
 
 impl ConsoleState {
@@ -62,6 +66,8 @@ impl ConsoleState {
             queued_tasks: Vec::new(),
             task_counter: 0,
             event_tx: None,
+            user_callsign: "Dispatch".to_string(),
+            console_name: "Console".to_string(),
         }
     }
 
@@ -121,6 +127,8 @@ pub fn handle_message(raw: RawInbound, state: &SharedState) -> Option<OutboundMs
                 slots: st.all_slot_infos(),
                 target: st.target,
                 queued_tasks: st.queued_tasks.len() as u32,
+                user_callsign: Some(st.user_callsign.clone()),
+                console_name: Some(st.console_name.clone()),
                 seq,
             })
         }

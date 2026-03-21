@@ -26,6 +26,8 @@ impl App {
         chat_tx: tokio::sync::broadcast::Sender<String>,
         agent_msg_tx: std::sync::mpsc::Sender<(usize, String)>,
         callsigns: Vec<String>,
+        user_callsign: String,
+        console_name: String,
     ) -> Self {
         let slot_count = callsigns.len();
         let slots: Vec<Option<SlotState>> = (0..slot_count).map(|_| None).collect();
@@ -60,6 +62,8 @@ impl App {
             chat_tx,
             agent_msg_tx,
             status_blink_frame: 0,
+            user_callsign,
+            console_name,
         }
     }
 
@@ -305,7 +309,7 @@ impl App {
                 self.push_ticker(format!(
                     "DISPATCH: {} (slot {})", callsign, slot_idx + 1
                 ));
-                self.push_chat("Dispatcher", &format!("Dispatched agent {}.", callsign));
+                self.push_chat(&self.console_name, &format!("Dispatched agent {}.", callsign));
 
                 // Sync ws_state.
                 {
@@ -349,7 +353,7 @@ impl App {
                     agent: callsign.clone(), slot: idx + 1,
                 });
                 self.push_ticker(format!("TERMINATED: {} (slot {})", callsign, idx + 1));
-                self.push_chat("Dispatcher", &format!("Terminated agent {}.", callsign));
+                self.push_chat(&self.console_name, &format!("Terminated agent {}.", callsign));
 
                 // Sync ws_state.
                 {
@@ -370,7 +374,7 @@ impl App {
             tools::ToolCall::Merge { task_id } => {
                 self.push_orch(OrchestratorEventKind::Merged { id: task_id.clone() });
                 self.push_ticker(format!("MERGED: {}", task_id));
-                self.push_chat("Dispatcher", &format!("{} merged.", task_id));
+                self.push_chat(&self.console_name, &format!("{} merged.", task_id));
                 tools::ToolResult::Merged {
                     task_id: task_id.clone(),
                     success: true,
@@ -427,7 +431,7 @@ impl App {
                 let _ = slot.writer.flush();
                 slot.last_output_at = Instant::now();
 
-                self.push_chat("Dispatcher", &format!("Message to {}: {}", agent_name, text));
+                self.push_chat(&self.console_name, &format!("Message to {}: {}", agent_name, text));
 
                 tools::ToolResult::MessageSent {
                     agent: agent_name,

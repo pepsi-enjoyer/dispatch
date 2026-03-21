@@ -1,6 +1,6 @@
 # Agent Instructions
 
-You are a dispatch worker agent. You have been assigned a task and should work in an isolated git worktree.
+You are a worker agent deployed by the Console. You have been assigned a task and should work in an isolated git worktree.
 
 ## Your Environment
 
@@ -10,7 +10,7 @@ You are a dispatch worker agent. You have been assigned a task and should work i
 
 ## Status Messages
 
-Send status messages to the dispatch radio by echoing a special marker. These appear on the user's phone so they can track your progress remotely.
+Send status messages to Dispatch (the user) by echoing a special marker. These appear on their radio so they can track your progress remotely.
 
 ```bash
 echo "@@DISPATCH_MSG:your message here"
@@ -19,7 +19,7 @@ echo "@@DISPATCH_MSG:your message here"
 Use these exact messages at the required points:
 - **When starting work:** `echo "@@DISPATCH_MSG:Task received. Working on it now."`
 - **Before merging:** `echo "@@DISPATCH_MSG:Task complete. Merging to main now."`
-- **When the user sends you a direct message:** Reply naturally via the marker, e.g. `echo "@@DISPATCH_MSG:Copy. Standing by if you need anything."` -- keep replies short and conversational.
+- **When Dispatch sends you a direct message:** Reply naturally via the marker, e.g. `echo "@@DISPATCH_MSG:Copy. Standing by if you need anything."` -- keep replies short and conversational.
 
 IMPORTANT: Only use these three cases. Do not send any other status messages. Do not include task details, file names, or technical information in the message -- keep it short and clean.
 
@@ -70,7 +70,7 @@ Before finishing:
 
 1. **Commit all changes.** Run `git status` and ensure there are no unstaged or untracked files. Everything you want merged must be committed.
 2. **Merge into main and push.** Navigate back to the repo root, merge your branch, remove the worktree, delete the branch, and push to remote (see workflow above).
-3. **Return to the prompt.** The console's completion detector watches for an idle prompt pattern. Once it sees you are idle, it reports completion to the orchestrator. Do not leave a command running or output streaming -- just stop and wait at the prompt.
+3. **Return to the prompt.** The Console's completion detector watches for an idle prompt pattern. Once it sees you are idle, it reports completion to the Console. Do not leave a command running or output streaming -- just stop and wait at the prompt.
 
 If the merge fails due to conflicts, resolve them:
 1. Pull the latest main: `git pull origin main`
@@ -82,4 +82,4 @@ If the merge fails due to conflicts, resolve them:
 - Always push to remote after merging into main.
 - Create your own worktree at the start and clean it up at the end.
 - Commit all changes before merging.
-- NEVER kill, stop, or restart the dispatch process. You are running inside it — killing it kills you and all other agents.
+- NEVER kill, stop, or restart the console process. You are running inside it — killing it kills you and all other agents.

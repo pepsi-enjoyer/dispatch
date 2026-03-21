@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.3.0
+
+### Added
+
+- Configurable identity via `[identity]` section in `config.toml`: `user_callsign` (default "Dispatch") and `console_name` (default "Console"). These names appear in the radio chat log, orchestrator prompts, and agent prompts.
+- Identity names are propagated to the radio app via the `agents` response, enabling correct display and color-coding.
+
+### Changed
+
+- Naming convention: "Dispatch" now refers to the human user (who speaks over the radio), "Console" refers to the orchestrator system that coordinates agents.
+- Chat sender label changed from "Dispatcher" to the configured `console_name` (default "Console").
+- Voice transcript sender label changed from "You" to the configured `user_callsign` (default "Dispatch").
+- Orchestrator and agent prompt templates updated to use "Console" for the system and "Dispatch" for the user.
+
 ## v0.2.1
 
 ### Added

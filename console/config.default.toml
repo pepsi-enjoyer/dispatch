@@ -14,6 +14,12 @@ scrollback_lines = 1000
 # Pages are allocated automatically (4 slots per page).
 callsigns = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"]
 
+[identity]
+# Display name for the user (shown in chat log and used in prompts).
+user_callsign = "Dispatch"
+# Display name for the console/orchestrator.
+console_name = "Console"
+
 [tools]
 claude-code = "claude"
 copilot = "gh copilot suggest"
