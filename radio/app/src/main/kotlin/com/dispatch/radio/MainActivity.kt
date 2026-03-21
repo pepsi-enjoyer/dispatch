@@ -22,6 +22,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.content.res.ResourcesCompat
 import com.dispatch.radio.model.Agent
 import com.dispatch.radio.model.callsignColor
 import com.dispatch.radio.ui.AudioLevelView
@@ -410,7 +411,7 @@ class MainActivity : AppCompatActivity() {
         val tv = TextView(this).apply {
             this.text = fullText
             textSize = 11f
-            typeface = android.graphics.Typeface.MONOSPACE
+            typeface = ResourcesCompat.getFont(context, R.font.share_tech_mono)
             setTextColor(colorInt)
             setPadding(0, 2, 0, 2)
 
