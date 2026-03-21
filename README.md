@@ -85,6 +85,7 @@ Open the `radio/` directory in Android Studio, sync Gradle, and deploy to your p
 | `Tab`             | Cycle target forward across all agents     |
 | `Right` / `Left`  | Next / previous page                       |
 | `PgUp` / `PgDn`   | Scroll pane output up / down               |
+| `n`               | Spawn new agent in empty targeted slot     |
 | `k`               | Kill agent in targeted slot                |
 | `o`               | Toggle orchestrator view (event log)       |
 | `p`               | Show / hide full PSK                       |

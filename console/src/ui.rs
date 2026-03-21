@@ -252,7 +252,7 @@ fn standby_body(_global_idx: usize, _app: &App) -> Vec<Line<'static>> {
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  Console dispatches agents via voice.",
+        "  Press n to spawn an agent, or dispatch via voice.",
         Style::default().fg(Color::DarkGray),
     )));
     lines
@@ -493,8 +493,12 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 ViewMode::Agents => "",
                 ViewMode::Orchestrator => "ORCH ",
             };
+            let target_g = app.global_idx(app.target);
+            let target_empty = app.slots.get(target_g).map_or(true, |s| s.is_none());
             let hints = if app.view_mode == ViewMode::Orchestrator {
                 " o:back  ?:help  q:quit"
+            } else if target_empty {
+                " n:new  o:orch  ?:help  q:quit"
             } else {
                 " Enter:input  k:kill  o:orch  ?:help  q:quit"
             };
@@ -540,7 +544,7 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 pub fn render_help_overlay(f: &mut Frame, area: Rect) {
-    let r = centered_rect(52, 21, area);
+    let r = centered_rect(52, 22, area);
     f.render_widget(Clear, r);
     let lines = vec![
         Line::from(Span::styled(
@@ -555,6 +559,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::raw("  → / ←        Next / prev page")),
         Line::from(Span::raw("  PgUp / PgDn  Scroll output")),
         Line::from(Span::raw("  ↑ / ↓        Scroll orchestrator view")),
+        Line::from(Span::raw("  n            New agent in empty slot")),
         Line::from(Span::raw("  k            Kill target agent")),
         Line::from(Span::raw("  o            Toggle orchestrator view")),
         Line::from(Span::raw("  p            Toggle PSK visibility")),
