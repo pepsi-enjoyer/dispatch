@@ -89,6 +89,23 @@ impl App {
         }
     }
 
+    /// Broadcast current agent state to all connected radio clients.
+    /// Called whenever agent slots change so the radio stays in sync.
+    pub fn broadcast_agents(&self) {
+        let st = self.ws_state.lock().unwrap();
+        let msg = protocol::OutboundMsg::Agents {
+            slots: st.all_slot_infos(),
+            target: st.target,
+            queued_tasks: st.queued_tasks.len() as u32,
+            user_callsign: Some(st.user_callsign.clone()),
+            console_name: Some(st.console_name.clone()),
+            seq: None,
+        };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = self.chat_tx.send(json);
+        }
+    }
+
     pub fn global_idx(&self, local_idx: usize) -> usize {
         self.current_page * SLOTS_PER_PAGE + local_idx
     }
@@ -355,6 +372,7 @@ impl App {
                         repo: Some(repo_name_from_path(&target_repo).to_string()),
                     });
                 }
+                self.broadcast_agents();
 
                 tools::ToolResult::Dispatched {
                     slot: (slot_idx + 1) as u32,
@@ -396,6 +414,7 @@ impl App {
                         st.target = None;
                     }
                 }
+                self.broadcast_agents();
 
                 tools::ToolResult::Terminated {
                     slot: (idx + 1) as u32,

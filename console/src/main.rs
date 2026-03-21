@@ -238,6 +238,7 @@ fn main() -> io::Result<()> {
                         let mut st = app.ws_state.lock().unwrap();
                         st.slots[i] = None;
                     }
+                    app.broadcast_agents();
                     if let Some(id) = task_id {
                         app.push_orch(OrchestratorEventKind::TaskComplete { id: id.clone(), agent: callsign.clone() });
                         app.push_chat("System", &format!("{} completed task (slot {}).", callsign, i + 1));
@@ -289,6 +290,7 @@ fn main() -> io::Result<()> {
                                 agent.status = ws_server::AgentStatus::Idle;
                             }
                         }
+                        app.broadcast_agents();
                     } else if !is_idle_now && s.idle {
                         // Transition: idle -> working (new output detected).
                         s.idle = false;
@@ -298,6 +300,7 @@ fn main() -> io::Result<()> {
                                 agent.status = ws_server::AgentStatus::Busy;
                             }
                         }
+                        app.broadcast_agents();
                     }
                 }
             }
