@@ -146,17 +146,17 @@ class MainActivity : AppCompatActivity() {
         initContinuousManager()
         initWebSocket()
 
-        findViewById<android.widget.TextView>(R.id.btn_settings).setOnClickListener {
+        findViewById<android.widget.ImageView>(R.id.btn_settings).setOnClickListener {
             @Suppress("DEPRECATION")
             startActivityForResult(Intent(this, SettingsActivity::class.java), SETTINGS_REQUEST)
         }
 
-        findViewById<android.widget.TextView>(R.id.btn_interrupt).setOnClickListener {
+        findViewById<android.widget.ImageView>(R.id.btn_interrupt).setOnClickListener {
             wsClient?.send("""{"type":"interrupt"}""")
             haptics.sendConfirm()
         }
 
-        findViewById<android.widget.TextView>(R.id.btn_attach_image).setOnClickListener {
+        findViewById<android.widget.ImageView>(R.id.btn_attach_image).setOnClickListener {
             showImageSourceDialog()
         }
 
