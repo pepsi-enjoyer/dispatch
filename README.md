@@ -140,7 +140,6 @@ Open the `radio/` directory in Android Studio, sync Gradle, and deploy to your p
 dispatch                    # Start the console in the current repo
 dispatch regenerate-psk     # Generate a new PSK
 dispatch show-psk           # Print the current PSK
-dispatch config             # Print config file path
 dispatch edit-config        # Open config.toml in VS Code
 ```
 

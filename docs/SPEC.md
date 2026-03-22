@@ -713,7 +713,6 @@ copilot = "gh copilot suggest"
 dispatch                    # Start the console (default)
 dispatch regenerate-psk     # Generate a new PSK
 dispatch show-psk           # Print the current PSK to stdout
-dispatch config             # Print config file path
 dispatch edit-config        # Open config.toml in VS Code
 ```
 

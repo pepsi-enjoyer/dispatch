@@ -64,8 +64,6 @@ enum Commands {
     RegeneratePsk,
     /// Print the current pre-shared key
     ShowPsk,
-    /// Print the config file path
-    Config,
     /// Open the config file in VS Code
     EditConfig,
 }
@@ -82,10 +80,6 @@ fn main() -> io::Result<()> {
         }
         Some(Commands::ShowPsk) => {
             println!("{}", config::load_or_create().auth.psk);
-            return Ok(());
-        }
-        Some(Commands::Config) => {
-            println!("{}", config::config_path().display());
             return Ok(());
         }
         Some(Commands::EditConfig) => {
