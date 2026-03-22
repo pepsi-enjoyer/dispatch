@@ -19,8 +19,42 @@ use crate::util;
 /// Usage: `echo "@@DISPATCH_MSG:your message here"`
 pub const DISPATCH_MSG_MARKER: &str = "@@DISPATCH_MSG:";
 
+/// Strip ANSI escape sequences from a string, keeping only visible text.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    // CSI: skip until final byte 0x40-0x7e.
+                    for c2 in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c2) { break; }
+                    }
+                }
+                Some(']') => {
+                    // OSC: skip until BEL or ST.
+                    let mut prev = '\0';
+                    for c2 in chars.by_ref() {
+                        if c2 == '\x07' || (prev == '\x1b' && c2 == '\\') { break; }
+                        prev = c2;
+                    }
+                }
+                Some(c2) if ('\x40'..='\x5f').contains(&c2) => {}
+                _ => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Check a line buffer for a dispatch marker and send the message if it's new.
 /// Called on line endings (\n, \r\n, \r\r) and on bare \r (before redraw discard).
+///
+/// Filters out false positives from file display (Read tool, cat, etc.) where
+/// the marker string appears as documentation text rather than a real agent echo.
 fn check_dispatch_marker(
     line_buf: &[u8],
     marker: &str,
@@ -33,22 +67,27 @@ fn check_dispatch_marker(
         // terminal renders the shell command echo and its output on the
         // same line, the last occurrence is the actual output.
         if let Some(pos) = line.rfind(marker) {
-            // Skip shell command lines (e.g. `echo "@@DISPATCH_MSG:..."`).
-            // Check a window before the marker for "echo" to filter shell
-            // command lines. Use 64 bytes to account for ANSI escape
-            // sequences (e.g. syntax highlighting, ConPTY cursor
-            // positioning) that may appear between the echo keyword and
-            // the marker.
-            //
-            // Use byte-level search to avoid panicking when the window
-            // start falls inside a multi-byte UTF-8 character.
-            let window_start = pos.saturating_sub(64);
-            if line.as_bytes()[window_start..pos]
-                .windows(4)
-                .any(|w| w == b"echo")
-            {
+            // Strip ANSI escape sequences from the text before the marker
+            // so syntax highlighting doesn't interfere with filtering.
+            let prefix = strip_ansi(&line[..pos]);
+
+            // Filter 1: Skip shell command lines containing "echo".
+            if prefix.as_bytes().windows(4).any(|w| w == b"echo") {
                 return;
             }
+
+            // Filter 2: Skip lines with substantial visible content before
+            // the marker. Real markers appear at or near line start (output
+            // of an echo command, 0-2 visible chars). File display (Read
+            // tool, cat -n, markdown prose) always has preceding context
+            // (line numbers, text, code) producing 10+ visible characters.
+            let visible_count = prefix.chars()
+                .filter(|c| !c.is_whitespace() && !c.is_control())
+                .count();
+            if visible_count > 8 {
+                return;
+            }
+
             let msg = util::clean_dispatch_msg(&line[pos + marker.len()..]);
             if !msg.is_empty() && !sent_msgs.contains(&msg) {
                 sent_msgs.insert(msg.clone());
@@ -386,22 +425,56 @@ mod tests {
     }
 
     #[test]
-    fn echo_window_safe_with_multibyte_utf8() {
-        // When a multi-byte UTF-8 char (e.g. ⏺ = 3 bytes) sits within 64
-        // bytes of the marker, the echo window check must not panic.
-        // ⏺ is \xe2\x8f\xba (3 bytes).
+    fn echo_filtered_with_multibyte_utf8() {
+        // When a multi-byte UTF-8 char (e.g. ⏺ = 3 bytes) sits before
+        // the marker, the echo check must not panic.
         let line = "\x1b[1m⏺\x1b[0m Bash: echo \"@@DISPATCH_MSG:Task received.\"";
-        // This is a command line — should be filtered (contains echo in window).
+        // This is a command line — should be filtered (contains echo).
         let msg = run_marker_check(line);
         assert_eq!(msg, None);
     }
 
     #[test]
-    fn echo_window_safe_with_wide_unicode_prefix() {
-        // Multiple multi-byte chars before the marker.
+    fn marker_passes_with_short_unicode_prefix() {
+        // A few multi-byte box-drawing chars before the marker (≤ 8 visible).
         let line = "──── @@DISPATCH_MSG:Task complete.";
         let msg = run_marker_check(line);
         assert_eq!(msg.as_deref(), Some("Task complete."));
+    }
+
+    #[test]
+    fn marker_filtered_in_file_display_prose() {
+        // When an agent reads ARCHITECTURE.md, documentation text containing
+        // the marker string appears in the PTY. The visible prefix is long
+        // enough to filter it out.
+        let line = "**Agent status messages:** Agents echo `@@DISPATCH_MSG:` markers";
+        let msg = run_marker_check(line);
+        assert_eq!(msg, None);
+    }
+
+    #[test]
+    fn marker_filtered_in_file_display_with_line_numbers() {
+        // Read tool output format: line numbers + file content.
+        let line = "    33\techo \"@@DISPATCH_MSG:Task received.\"";
+        let msg = run_marker_check(line);
+        assert_eq!(msg, None);
+    }
+
+    #[test]
+    fn marker_filtered_in_markdown_example() {
+        // Markdown inline code showing the marker usage in AGENTS.md.
+        let line = "  - Made changes: `echo \"@@DISPATCH_MSG:Done. Fixed X.\"`";
+        let msg = run_marker_check(line);
+        assert_eq!(msg, None);
+    }
+
+    #[test]
+    fn marker_filtered_with_ansi_inflated_echo() {
+        // ANSI codes between "echo" and marker that would have exceeded the
+        // old 64-byte window. Now works because ANSI is stripped first.
+        let line = "\x1b[32mecho\x1b[0m \x1b[33m\"\x1b[0m\x1b[31m\x1b[1m\x1b[4m\x1b[35m\x1b[42m\x1b[48;5;200m@@DISPATCH_MSG:Task received.";
+        let msg = run_marker_check(line);
+        assert_eq!(msg, None);
     }
 
     /// Simulate the full byte processing loop to test bare-\r marker recovery.
