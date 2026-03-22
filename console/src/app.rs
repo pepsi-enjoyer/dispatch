@@ -47,9 +47,7 @@ impl App {
             pane_rows,
             pane_cols,
             tools,
-            ticker_tape: String::new(),
-            ticker_tape_chars: 0,
-            ticker_offset: 0,
+            ticker_items: Vec::new(),
             ticker_frame_counter: 0,
             workspace,
             repo_select_idx: 0,
@@ -190,58 +188,53 @@ impl App {
         (self.status_blink_frame % 60) < 42
     }
 
-    /// Append a message to the continuous ticker tape.
-    /// New content flows in from the right after any existing content.
+    /// Push a new independently-scrolling ticker message.
+    /// Each message starts at the right edge and scrolls left on its own.
     pub fn push_ticker(&mut self, msg: impl Into<String>) {
-        let msg = msg.into();
-        if self.ticker_tape.is_empty() || self.ticker_offset > self.ticker_tape_chars + 300 {
-            // Tape is empty or all content has scrolled off-screen; start fresh.
-            self.ticker_tape = msg;
-            self.ticker_tape_chars = self.ticker_tape.chars().count();
-            self.ticker_offset = 0;
-            self.ticker_frame_counter = 0;
-        } else {
-            // Append with separator so it flows in after existing content.
-            self.ticker_tape.push_str("  ///  ");
-            self.ticker_tape.push_str(&msg);
-            self.ticker_tape_chars = self.ticker_tape.chars().count();
-        }
+        let text = msg.into();
+        let char_count = text.chars().count();
+        self.ticker_items.push(TickerItem {
+            text,
+            char_count,
+            offset: 0,
+        });
     }
 
     /// Advance the ticker by one frame (~16ms). Scrolls one char every 3 frames (~50ms).
     pub fn tick_ticker(&mut self) {
-        if self.ticker_tape.is_empty() {
+        if self.ticker_items.is_empty() {
             return;
         }
         self.ticker_frame_counter = self.ticker_frame_counter.wrapping_add(1);
         if self.ticker_frame_counter % 3 == 0 {
-            self.ticker_offset += 1;
-            // Clear tape once everything has scrolled off-screen.
-            if self.ticker_offset > self.ticker_tape_chars + 300 {
-                self.ticker_tape.clear();
-                self.ticker_tape_chars = 0;
-                self.ticker_offset = 0;
+            for item in &mut self.ticker_items {
+                item.offset += 1;
             }
+            // Remove items that have fully scrolled off the left edge.
+            // An item is off-screen when its offset exceeds char_count + generous margin.
+            self.ticker_items.retain(|item| item.offset <= item.char_count + 300);
         }
     }
 
     /// Build the visible ticker string for a given display width.
-    /// Content scrolls right-to-left: enters from the right edge, exits left.
-    /// Tape char at index i appears at screen position (width - offset + i).
+    /// Each item scrolls independently right-to-left.
+    /// Item char at index i appears at screen position (width - offset + i).
     pub fn ticker_display(&self, width: usize) -> String {
-        if self.ticker_tape.is_empty() {
+        if self.ticker_items.is_empty() {
             return " ".repeat(width);
         }
         let mut line = vec![' '; width];
-        // Skip chars already off-screen to the left.
-        let start = self.ticker_offset.saturating_sub(width);
-        for (idx, ch) in self.ticker_tape.chars().enumerate().skip(start) {
-            let pos = width as isize - self.ticker_offset as isize + idx as isize;
-            if pos >= width as isize {
-                break; // Rest is off-screen to the right.
-            }
-            if pos >= 0 {
-                line[pos as usize] = ch;
+        // Render older items first so newer items layer on top if they overlap.
+        for item in &self.ticker_items {
+            let start = item.offset.saturating_sub(width);
+            for (idx, ch) in item.text.chars().enumerate().skip(start) {
+                let pos = width as isize - item.offset as isize + idx as isize;
+                if pos >= width as isize {
+                    break;
+                }
+                if pos >= 0 {
+                    line[pos as usize] = ch;
+                }
             }
         }
         line.into_iter().collect()
