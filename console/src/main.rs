@@ -443,6 +443,14 @@ fn main() -> io::Result<()> {
             if let Some(orch) = &mut app.orchestrator {
                 orch.send_message(&format!("[AGENT_MSG] {}: {}", callsign, text));
             }
+            // Auto-detect merge: when an agent reports merging and pushing,
+            // generate the system merge message for the radio and orch log.
+            let lower = text.to_lowercase();
+            if lower.contains("merged") && lower.contains("pushed") {
+                app.push_orch(OrchestratorEventKind::Merged { id: callsign.clone() });
+                app.push_ticker(format!("MERGED: {}", callsign));
+                app.push_chat("System", &format!("{} has merged to remote.", callsign));
+            }
         }
 
         // dispatch-h62: poll orchestrator output and execute tool calls.
