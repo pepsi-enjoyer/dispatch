@@ -42,11 +42,6 @@ class PushToTalkManager(
 
     private val handler = Handler(Looper.getMainLooper())
 
-    init {
-        // Pre-warm the recognizer so the first PTT press doesn't include init latency.
-        ensureRecognizer()
-    }
-
     /** Call from onKeyDown for KEYCODE_VOLUME_DOWN. */
     fun startListening() {
         if (listening) return
@@ -89,14 +84,13 @@ class PushToTalkManager(
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         putExtra(RecognizerIntent.EXTRA_LANGUAGE, locale)
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-        putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         // Suppress silence-based cutoff while key is held
         putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 60000L)
         putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 60000L)
         // Keep minimum length low so the recognizer starts delivering partial results
         // immediately rather than buffering audio for a long expected utterance.
         // The silence-length extras above already prevent auto-stop.
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 50L)
     }
 
     /** Combine accumulated transcript with the current segment. */
@@ -128,7 +122,7 @@ class PushToTalkManager(
         override fun onRmsChanged(rmsdB: Float) {
             // Normalize RMS to 0.0-1.0 range. SpeechRecognizer reports roughly -2 to 10 dB.
             val normalized = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
-            onRmsChanged(normalized)
+            this@PushToTalkManager.onRmsChanged(normalized)
         }
 
         override fun onBufferReceived(buffer: ByteArray?) {}
