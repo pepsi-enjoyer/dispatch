@@ -77,8 +77,7 @@ Orchestrator Reader Thread (blocking)
 PTY Reader Threads (one per agent, blocking)
 ├── Reads PTY output in 4KB chunks
 ├── Feeds vt100 parser
-├── Detects @@DISPATCH_MSG markers
-└── Sends agent messages to main via mpsc
+└── Updates idle-detection timestamp
 ```
 
 The main thread runs a synchronous 16ms tick loop. Everything it needs from background threads arrives via channels (`mpsc` or `broadcast`). Lock contention is minimal -- the only shared mutex is `ConsoleState` (held briefly for WebSocket message dispatch).
@@ -120,13 +119,14 @@ Each slot holds one running agent process in a PTY. Slots are indexed 0-based in
 **Dispatch flow:**
 1. `pty::dispatch_slot()` creates the PTY via `portable-pty`
 2. Reads `docs/AGENTS.md` for agent instructions, appends shared memory from `.dispatch/MEMORY.md`
-3. Spawns `claude --system-prompt <prompt> --dangerously-skip-permissions [task]`
-4. Starts a reader thread that feeds output to the vt100 parser and extracts `@@DISPATCH_MSG` markers
-5. Returns `SlotState` to the main thread
+3. Sets `DISPATCH_MSG_FILE` env var pointing to `.dispatch/messages/{callsign}`
+4. Spawns `claude --system-prompt <prompt> --dangerously-skip-permissions [task]`
+5. Starts a reader thread that feeds output to the vt100 parser and updates the idle-detection timestamp
+6. Returns `SlotState` to the main thread
 
 **Idle detection:** If an agent with a task ID produces no output for 10 seconds, it's marked idle and an `[EVENT] AGENT_IDLE` is sent to the orchestrator. New output transitions it back to working.
 
-**Agent status messages:** Agents echo `@@DISPATCH_MSG:` markers to their PTY. The reader thread extracts these, deduplicates them, and forwards them to the main thread, which relays them to the orchestrator and broadcasts them to radios as chat messages.
+**Agent status messages:** Agents write messages to `.dispatch/messages/{callsign}` files (one line per message). The main loop polls these files for new content and forwards messages to the orchestrator and radio. Lines prefixed with `[MERGE]` trigger the system merge notification. This file-based approach eliminates the fragile terminal-output-parsing system that was prone to ANSI noise and ConPTY artifacts.
 
 ### Event Loop (main.rs)
 
@@ -136,7 +136,7 @@ The main loop runs every 16ms and processes in this order:
 2. **Idle detection** -- check `last_output_at` timestamps, transition idle/busy
 3. **Ticker animation** -- advance scrolling marquee, pulse status indicator
 4. **WebSocket events** -- voice transcripts forwarded to orchestrator; images saved and paths written to agent PTY
-5. **Agent status messages** -- `@@DISPATCH_MSG` markers forwarded to orchestrator and radio chat
+5. **Agent status messages** -- poll `.dispatch/messages/` files, forward to orchestrator and radio chat
 6. **Orchestrator output** -- parse tool calls from response text, execute tools, send results back
 7. **TUI render** -- header, ticker, 2x2 agent grid (or orchestrator log), footer, overlays
 8. **Keyboard input** -- command mode (navigation, dispatch, kill) or input mode (type to PTY)
@@ -329,13 +329,13 @@ Orchestrator calls dispatch(repo, prompt, callsign)
   ├─ Console assigns slot, spawns PTY
   │    └─ claude launched with system prompt from docs/AGENTS.md + MEMORY.md
   │
-  ├─ Agent sends @@DISPATCH_MSG: "Task received"
+  ├─ Agent writes "Task received" to .dispatch/messages/{callsign}
   │
   ├─ Agent creates git worktree (.dispatch/.worktrees/{callsign})
   ├─ Agent works, commits on dispatch/{callsign} branch
   ├─ Agent merges to main, removes worktree, pushes
   │
-  ├─ Agent sends @@DISPATCH_MSG: "Done. Fixed X, merged and pushed."
+  ├─ Agent writes "[MERGE] Done. Fixed X, merged and pushed." to message file
   │
   ├─ Agent goes idle at prompt
   │    └─ Console detects 10s inactivity → AGENT_IDLE event
@@ -352,7 +352,7 @@ Agents share knowledge through `.dispatch/MEMORY.md` in the target repo -- a git
 
 2. **Worktree-per-agent.** Each agent works on its own branch in its own worktree. Parallel work without merge conflicts. Agents handle the full git lifecycle (create, commit, merge, push, clean up).
 
-3. **Marker-based agent communication.** Agents emit `@@DISPATCH_MSG:` markers to their PTY output. The console's reader thread extracts these and routes them to the orchestrator and radio. No sideband channel needed.
+3. **File-based agent communication.** Agents write messages to `.dispatch/messages/{callsign}` files. The console's main loop polls these files for new content and routes messages to the orchestrator and radio. This avoids the fragility of parsing messages from terminal output (ANSI noise, ConPTY artifacts, TUI redraws).
 
 4. **Sync main loop, async networking.** The TUI runs a synchronous 16ms tick loop for predictable rendering and input handling. Networking (WebSocket, mDNS) runs on a separate tokio runtime. Communication is channel-based.
 

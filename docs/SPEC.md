@@ -374,7 +374,7 @@ Sends a base64-encoded image targeted at a specific agent by callsign. The conso
 
 Pushed to all connected clients whenever the orchestrator produces text or other significant events occur. Not a response to any request -- the console pushes these proactively. The `sender` field identifies who said it: the configured `user_callsign` (default `"Dispatch"`) for voice transcripts, the configured `console_name` (default `"Console"`) for orchestrator decisions, or an agent callsign (e.g. `"Alpha"`) for agent status messages.
 
-**Agent status messages:** Agents send chat messages by echoing a special marker to their PTY: `echo "@@DISPATCH_MSG:message text"`. The console's PTY reader detects this marker in the byte stream and broadcasts it as a chat message with the agent's callsign as the sender. Agent messages are also forwarded to the orchestrator LLM as `[AGENT_MSG] Callsign: text` so it can track agent progress. Agents are instructed to emit these at key workflow points (started, completed).
+**Agent status messages:** Agents write messages to `.dispatch/messages/{callsign}` files by appending lines via `echo "message" >> "$DISPATCH_MSG_FILE"`. The console polls these files for new content and broadcasts each new line as a chat message with the agent's callsign as the sender. Lines prefixed with `[MERGE]` trigger the system merge notification. Agent messages are also forwarded to the orchestrator LLM as `[AGENT_MSG] Callsign: text` so it can track agent progress. Agents are instructed to emit these at key workflow points (started, completed).
 
 **Error**
 

@@ -24,7 +24,6 @@ impl App {
         workspace: Workspace,
         scrollback_lines: u32,
         chat_tx: tokio::sync::broadcast::Sender<String>,
-        agent_msg_tx: std::sync::mpsc::Sender<(usize, String)>,
         callsigns: Vec<String>,
         user_callsign: String,
         console_name: String,
@@ -58,7 +57,6 @@ impl App {
             orchestrator: None,
             pending_voice: Vec::new(),
             chat_tx,
-            agent_msg_tx,
             status_blink_frame: 0,
             user_callsign,
             console_name,
@@ -325,7 +323,6 @@ impl App {
                         None, self.scrollback_lines,
                         repo_name_from_path(&target_repo), &target_repo,
                         Some(&full_prompt),
-                        self.agent_msg_tx.clone(),
                         &callsign_for_prompt,
                     ) {
                         Some(slot) => { self.slots[slot_idx] = Some(slot); }

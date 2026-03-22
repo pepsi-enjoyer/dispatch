@@ -57,7 +57,7 @@ pub enum OrchestratorEventKind {
     ToolCallIssued { name: String },
     /// Tool result sent back to orchestrator.
     ToolResultSent { name: String, success: bool },
-    /// Status message from an agent (@@DISPATCH_MSG).
+    /// Status message from an agent.
     AgentMessage { agent: String, text: String },
 }
 
@@ -120,6 +120,9 @@ pub struct SlotState {
     pub idle: bool,                           // true when no output for idle threshold
     // Scrollback (dispatch-ct2.4): lines scrolled back from bottom
     pub scroll_offset: usize,
+    // File-based agent messaging: absolute path to the message file and read offset.
+    pub msg_file: String,
+    pub msg_offset: u64,
 }
 
 impl SlotState {
@@ -166,8 +169,6 @@ pub struct App {
     pub pending_voice: Vec<String>,
     // Broadcast channel for pushing chat messages to radio clients
     pub chat_tx: tokio::sync::broadcast::Sender<String>,
-    // Sender for agent chat messages (cloned into each PTY reader thread)
-    pub agent_msg_tx: std::sync::mpsc::Sender<(usize, String)>,
     // Status indicator blink frame counter (pulsing REC-light effect)
     pub status_blink_frame: u16,
     /// Display name for the user (default: "Dispatch").
