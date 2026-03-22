@@ -7,11 +7,29 @@
 
 The dispatch console is a well-structured Rust TUI (~1500 LOC) with clean separation between PTY management, UI rendering, orchestrator logic, and WebSocket serving. The codebase follows the stated design philosophy of simplicity. However, several patterns cause unnecessary allocations, redundant work per frame, and mutex contention that affect responsiveness under load (multiple active agents producing output).
 
-The most impactful issues are: unconditional full redraws at 60fps, allocation-heavy VT100 screen conversion every frame, O(n) removals from Vec heads, and missing dirty-tracking to skip idle frames.
+The most impactful issues are: unconditional full redraws at 60fps, allocation-heavy VT100 screen conversion every frame, and missing dirty-tracking to skip idle frames.
+
+## Priority Summary
+
+| Priority | Issue | Location | Fix Effort |
+|----------|-------|----------|------------|
+| HIGH | Add dirty-tracking to skip idle redraws | main.rs | Medium |
+| HIGH | Reduce allocations in screen_to_lines() | ui.rs | Low |
+| MEDIUM | Reduce mutex hold time for VT100 screens | pty.rs, ui.rs | Medium |
+| MEDIUM | Fix resize_all_slots scrollback loss | pty.rs | Low |
+| MEDIUM | Cache per-frame strings (clock, ticker) | ui.rs, app.rs | Low |
+| LOW | Fix truncate() UTF-8 safety | util.rs | Trivial |
+| LOW | Improve strip_action_blocks() to single-pass | util.rs | Low |
+| LOW | Skip pane rendering under overlays | main.rs | Low |
+| LOW | Avoid Vec allocation in key_to_pty_bytes() | pty.rs | Low |
+| LOW | Avoid deep clone in render_orchestrator() | ui.rs | Low |
+| NEGLIGIBLE | Only return occupied slots from all_slot_infos() | handler.rs | Low |
 
 ---
 
-## 1. Render Loop: Unconditional 60fps Full Redraw
+## High Priority
+
+### Render Loop: Unconditional 60fps Full Redraw
 
 **Files:** `console/src/main.rs` lines 334-373, `console/src/ui.rs` lines 310-353
 
@@ -26,11 +44,11 @@ When agents are idle and no input arrives, this is pure waste -- the output is i
 
 **Recommendation:** Add a dirty flag. Set it when: PTY output arrives, user input occurs, ticker advances, resize happens, or overlay changes. Skip `terminal.draw()` when clean. This alone could cut CPU usage 50-90% during idle periods. A simpler alternative: increase the poll timeout to 100ms when idle (10fps) and drop to 16ms only when PTY output is flowing.
 
-**Impact:** HIGH -- affects baseline CPU usage at all times.
+**Impact:** Affects baseline CPU usage at all times.
 
 ---
 
-## 2. screen_to_lines() Allocation Storm
+### screen_to_lines() Allocation Storm
 
 **File:** `console/src/ui.rs` lines 25-71
 
@@ -48,11 +66,13 @@ With 4 active panes, this is ~12,800 cell accesses and thousands of String/Span 
 2. Pre-allocate the `spans` vector with `Vec::with_capacity(screen.size().1 as usize)` since worst case is one span per column.
 3. Consider caching the converted lines and only reconverting when the screen mutex shows new data has arrived (via a generation counter or dirty flag on the PTY reader side).
 
-**Impact:** HIGH -- this is the hottest path in the application.
+**Impact:** This is the hottest path in the application.
 
 ---
 
-## 3. Mutex Contention Between PTY Reader and Render Thread
+## Medium Priority
+
+### Mutex Contention Between PTY Reader and Render Thread
 
 **Files:** `console/src/pty.rs` line 114, `console/src/ui.rs` lines 322-326
 
@@ -64,36 +84,27 @@ Conversely, `screen_to_lines()` holds the lock for the full cell-by-cell iterati
 
 Note: the current `set_scrollback()`/`set_scrollback(0)` sandwich in ui.rs lines 323-326 means the lock is held for even longer than just reading cells -- it also mutates scrollback state.
 
-**Impact:** MEDIUM -- noticeable during burst output but acceptable for typical AI agent workloads.
+**Impact:** Noticeable during burst output but acceptable for typical AI agent workloads.
 
 ---
 
-~~## 4. O(n) Vec::remove(0) on orch_log and orchestrator pending queue~~
+### resize_all_slots Discards Scrollback
 
-~~**Files:** `console/src/app.rs` line 68, `console/core/src/orchestrator.rs` line 218~~
+**File:** `console/src/pty.rs` lines 175-181
 
-~~**Issue:** `orch_log` is a `Vec<OrchestratorEvent>` capped at 500 entries. When it overflows, `self.orch_log.remove(0)` shifts all ~500 elements left. This is O(n) per removal.~~
+**Issue:** On terminal resize, all VT100 parsers are replaced with new ones:
+```rust
+*parser = vt100::Parser::new(new_size.rows, new_size.cols, 0);
+```
+The `0` scrollback parameter means all terminal history is lost on resize. The original scrollback size (`scrollback_lines`) is not passed through.
 
-~~Similarly, in orchestrator.rs:218, `self.pending.remove(0)` removes the first pending message. While the pending queue is typically small, it's still an avoidable O(n).~~
+**Recommendation:** Store the scrollback capacity in `SlotState` and use it when recreating parsers. Or better, check if vt100 supports in-place resize (it likely does via `set_size()`).
 
-~~**Recommendation:** Change `orch_log` from `Vec` to `VecDeque`. Use `pop_front()` instead of `remove(0)`. For the orchestrator pending queue, also use `VecDeque` or `drain(..1)`.~~
-
-~~```rust~~
-~~// app.rs - before:~~
-~~if self.orch_log.len() > 500 {~~
-~~    self.orch_log.remove(0);~~
-~~}~~
-~~// after:~~
-~~if self.orch_log.len() > 500 {~~
-~~    self.orch_log.pop_front();~~
-~~}~~
-~~```~~
-
-~~**Impact:** LOW (500 elements is small) but trivial to fix.~~
+**Impact:** Resize events lose all terminal output, which is disorienting for users.
 
 ---
 
-## 5. Per-Frame String Allocations in Header/Footer/Ticker
+### Per-Frame String Allocations in Header/Footer/Ticker
 
 **Files:** `console/src/ui.rs` lines 83-169 (header), 472-518 (footer), `console/src/app.rs` lines 206-222 (ticker_display)
 
@@ -109,37 +120,13 @@ Note: the current `set_scrollback()`/`set_scrollback(0)` sandwich in ui.rs lines
 2. For `ticker_display()`, reuse a `String` buffer on `App` rather than allocating fresh each frame.
 3. For pane info strips, cache the static portions (slot number, tool name, dispatch wall string) and only reformat the runtime each frame.
 
-**Impact:** MEDIUM -- individually small but they compound across 4 panes at 60fps.
+**Impact:** Individually small but they compound across 4 panes at 60fps.
 
 ---
 
-## 6. key_to_pty_bytes() Allocates a Vec Per Keystroke
+## Low Priority
 
-**File:** `console/src/pty.rs` lines 183-229
-
-**Issue:** Every key press in input mode allocates a `Vec<u8>`. Most escape sequences are 3-6 bytes (e.g., `b"\x1b[A".to_vec()`). Single characters allocate a 4-byte buffer, encode into it, then `.to_vec()` the slice.
-
-**Recommendation:** Return a fixed-size array or `ArrayVec<u8, 8>` (from the `arrayvec` crate) to avoid heap allocation. Alternatively, return `Cow<'static, [u8]>` so the static sequences like `b"\x1b[A"` are zero-copy.
-
-A simpler approach without adding dependencies: write directly to the PTY writer instead of returning bytes, avoiding the intermediate allocation entirely.
-
-**Impact:** LOW -- keystroke frequency is human-limited.
-
----
-
-## 7. strip_action_blocks() Quadratic String Mutation
-
-**File:** `console/src/util.rs` lines 49-69
-
-**Issue:** The function mutates a `String` in-place with `replace_range()` inside a `while` loop. Each `replace_range` is O(n) because it shifts the trailing bytes. With m action blocks in an n-length string, this is O(n*m). Additionally, `result.find("</tool_call>")` on line 62 searches from the beginning each time, not from the current position.
-
-**Recommendation:** Build the output by copying non-block segments into a new String in a single pass, similar to how `parse_all_tool_calls` works. For typical orchestrator output (1-2 tool calls in a few KB of text), this is not a practical problem, but it's worth noting for correctness.
-
-**Impact:** LOW -- orchestrator messages are small.
-
----
-
-## 8. truncate() Uses Byte Indexing on Potentially Multi-Byte Strings
+### truncate() Uses Byte Indexing on Multi-Byte Strings
 
 **File:** `console/src/util.rs` lines 37-45
 
@@ -156,27 +143,37 @@ pub fn truncate(s: &str, max: usize) -> String {
 
 **Recommendation:** Use `.chars().take(max - 3)` or find the nearest char boundary with `s.floor_char_boundary(max - 3)` (nightly) or manual boundary detection.
 
-**Impact:** LOW for typical ASCII callsigns/paths, but a latent correctness bug.
+**Impact:** Low for typical ASCII callsigns/paths, but a latent correctness bug.
 
 ---
 
-## 9. resize_all_slots Discards Scrollback
+### strip_action_blocks() Quadratic String Mutation
 
-**File:** `console/src/pty.rs` lines 175-181
+**File:** `console/src/util.rs` lines 49-69
 
-**Issue:** On terminal resize, all VT100 parsers are replaced with new ones:
-```rust
-*parser = vt100::Parser::new(new_size.rows, new_size.cols, 0);
-```
-The `0` scrollback parameter means all terminal history is lost on resize. The original scrollback size (`scrollback_lines`) is not passed through.
+**Issue:** The function mutates a `String` in-place with `replace_range()` inside a `while` loop. Each `replace_range` is O(n) because it shifts the trailing bytes. With m action blocks in an n-length string, this is O(n*m). Additionally, `result.find("</tool_call>")` on line 62 searches from the beginning each time, not from the current position.
 
-**Recommendation:** Store the scrollback capacity in `SlotState` and use it when recreating parsers. Or better, check if vt100 supports in-place resize (it likely does via `set_size()`).
+**Recommendation:** Build the output by copying non-block segments into a new String in a single pass, similar to how `parse_all_tool_calls` works. For typical orchestrator output (1-2 tool calls in a few KB of text), this is not a practical problem, but it's worth noting for correctness.
 
-**Impact:** MEDIUM -- resize events lose all terminal output, which is disorienting for users.
+**Impact:** Orchestrator messages are small.
 
 ---
 
-## 10. Redundant Work When Overlays Are Visible
+### key_to_pty_bytes() Allocates a Vec Per Keystroke
+
+**File:** `console/src/pty.rs` lines 183-229
+
+**Issue:** Every key press in input mode allocates a `Vec<u8>`. Most escape sequences are 3-6 bytes (e.g., `b"\x1b[A".to_vec()`). Single characters allocate a 4-byte buffer, encode into it, then `.to_vec()` the slice.
+
+**Recommendation:** Return a fixed-size array or `ArrayVec<u8, 8>` (from the `arrayvec` crate) to avoid heap allocation. Alternatively, return `Cow<'static, [u8]>` so the static sequences like `b"\x1b[A"` are zero-copy.
+
+A simpler approach without adding dependencies: write directly to the PTY writer instead of returning bytes, avoiding the intermediate allocation entirely.
+
+**Impact:** Keystroke frequency is human-limited.
+
+---
+
+### Redundant Work When Overlays Are Visible
 
 **File:** `console/src/main.rs` lines 334-372
 
@@ -184,11 +181,11 @@ The `0` scrollback parameter means all terminal history is lost on resize. The o
 
 **Recommendation:** Skip pane rendering when a full-screen overlay is active. For partial overlays (centered dialogs), this is less important since ratatui's diff algorithm minimizes actual terminal writes, but the allocation work in `screen_to_lines` still happens.
 
-**Impact:** LOW -- overlays are infrequent.
+**Impact:** Overlays are infrequent.
 
 ---
 
-## 11. Orchestrator render_orchestrator() Clones Visible Lines
+### render_orchestrator() Clones Visible Lines
 
 **File:** `console/src/ui.rs` lines 450
 
@@ -196,11 +193,13 @@ The `0` scrollback parameter means all terminal history is lost on resize. The o
 
 **Recommendation:** Use a slice reference directly. `Paragraph::new()` accepts `Text::from(lines)` but the lifetime of the slice must outlive the frame. Since `lines` is a local, the simplest fix is to drain/take the subrange rather than clone, or restructure to avoid the intermediate full `lines` vec.
 
-**Impact:** LOW -- only when orchestrator view is active.
+**Impact:** Only when orchestrator view is active.
 
 ---
 
-## 12. all_slot_infos() Always Returns 26 Items
+## Negligible
+
+### all_slot_infos() Always Returns 26 Items
 
 **File:** `console/core/src/handler.rs` lines 90-92
 
@@ -208,11 +207,11 @@ The `0` scrollback parameter means all terminal history is lost on resize. The o
 
 **Recommendation:** Only return occupied slots, or use a fixed-size array to avoid heap allocation. This is a WebSocket response path, not the render loop, so impact is minimal.
 
-**Impact:** NEGLIGIBLE.
-
 ---
 
-## 13. Startup Latency Profile
+## Observations (No Issues Found)
+
+### Startup Latency
 
 **File:** `console/src/main.rs` lines 72-176
 
@@ -224,15 +223,11 @@ The startup sequence is well-optimized:
 - Orchestrator spawned eagerly on a background thread (good -- eliminates first-message lag)
 - `git rev-parse --show-toplevel` is the only subprocess in the critical path
 
-**Observation:** The orchestrator waits up to 10 seconds for a session_id (orchestrator.rs:160). If Claude is slow to start, this blocks the background thread for 10s. The main TUI is responsive during this time, but voice messages are queued. This is acceptable.
+**Note:** The orchestrator waits up to 10 seconds for a session_id (orchestrator.rs:160). If Claude is slow to start, this blocks the background thread for 10s. The main TUI is responsive during this time, but voice messages are queued. This is acceptable.
 
-No issues found with startup time.
+### Memory Usage
 
----
-
-## 14. Memory Usage Patterns
-
-**Observation:** Memory usage is well-bounded:
+Memory usage is well-bounded:
 - `orch_log` capped at 500 entries (app.rs:67)
 - `ticker_queue` is unbounded `VecDeque<String>` -- could grow large if messages arrive faster than they scroll, but this is unlikely in practice
 - VT100 parsers with configurable scrollback (default 1000 lines, capped at 10,000 in pty.rs:81)
@@ -243,18 +238,10 @@ The main memory consumers are the 4-26 vt100 parsers (each holding scrollback) a
 
 ---
 
-## Summary of Recommendations by Priority
+## Resolved
 
-| Priority | Issue | File | Fix Effort |
-|----------|-------|------|------------|
-| HIGH | Add dirty-tracking to skip idle redraws | main.rs | Medium |
-| HIGH | Reduce allocations in screen_to_lines() | ui.rs | Low |
-| MEDIUM | Reduce mutex hold time for VT100 screens | pty.rs, ui.rs | Medium |
-| ~~MEDIUM~~ | ~~Use VecDeque for orch_log~~ | ~~app.rs, types.rs~~ | ~~Trivial~~ |
-| MEDIUM | Fix resize_all_slots scrollback loss | pty.rs | Low |
-| MEDIUM | Cache per-frame strings (clock, ticker) | ui.rs, app.rs | Low |
-| LOW | Fix truncate() UTF-8 safety | util.rs | Trivial |
-| LOW | Improve strip_action_blocks() to single-pass | util.rs | Low |
-| LOW | Use VecDeque for orchestrator pending | orchestrator.rs | Trivial |
-| LOW | Skip pane rendering under overlays | main.rs | Low |
-| LOW | Avoid Vec allocation in key_to_pty_bytes() | pty.rs | Low |
+### O(n) Vec::remove(0) on orch_log and orchestrator pending queue
+
+**Files:** `console/src/app.rs` line 68, `console/core/src/orchestrator.rs` line 218
+
+`orch_log` was a `Vec<OrchestratorEvent>` capped at 500 entries using `self.orch_log.remove(0)` which shifted all ~500 elements left (O(n) per removal). Similarly, `self.pending.remove(0)` in the orchestrator was an avoidable O(n). Both were changed to use `VecDeque` with `pop_front()`.
