@@ -44,53 +44,25 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Clean a dispatch message: strip ANSI escapes and control chars,
-/// handle cursor-movement sequences (which may indicate terminal noise
-/// like status bars rendered after the message), and trim shell artifacts
-/// like trailing `")` from echo output.
+/// Clean a dispatch message: strip ANSI escapes and extract content from
+/// triple-backtick fences, ignoring any terminal noise outside them.
 pub fn clean_dispatch_msg(s: &str) -> String {
+    // Strip ANSI escapes first to get plain text for fence detection.
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
-    // Track the first cursor-movement-after-punctuation position as a
-    // candidate truncation point. We defer the decision until the end so
-    // multi-sentence messages ("Task received. Working on it now.") are
-    // preserved while terminal noise ("Done.\x1b[10Cthinking...") is stripped.
-    let mut truncate_candidate: Option<usize> = None;
     while let Some(c) = chars.next() {
         if c == '\x1b' {
             match chars.next() {
                 Some('[') => {
-                    // CSI sequence: collect params, then check final byte.
-                    let mut _param = String::new();
                     loop {
                         match chars.next() {
-                            Some(fb) if ('\x40'..='\x7e').contains(&fb) => {
-                                if matches!(fb, 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'd' | 'f')
-                                    && !out.trim().is_empty()
-                                {
-                                    // Record first cursor-movement after sentence
-                                    // punctuation as a potential truncation point.
-                                    if truncate_candidate.is_none()
-                                        && out.trim_end().ends_with(|c: char| c == '.' || c == '!' || c == '?')
-                                    {
-                                        truncate_candidate = Some(out.len());
-                                    }
-                                    // Insert space to preserve word boundaries —
-                                    // ConPTY uses cursor positioning instead of
-                                    // spaces within a line.
-                                    if !out.is_empty() && !out.ends_with(' ') {
-                                        out.push(' ');
-                                    }
-                                }
-                                break;
-                            }
-                            Some(c2) => _param.push(c2),
+                            Some(fb) if ('\x40'..='\x7e').contains(&fb) => break,
+                            Some(_) => {}
                             None => break,
                         }
                     }
                 }
                 Some(']') => {
-                    // OSC sequence: consume until ST (ESC \ or BEL)
                     let mut prev = '\0';
                     for c2 in chars.by_ref() {
                         if c2 == '\x07' || (prev == '\x1b' && c2 == '\\') {
@@ -103,59 +75,18 @@ pub fn clean_dispatch_msg(s: &str) -> String {
                 _ => {}
             }
         } else if !c.is_control() {
-            // Collapse runs of whitespace to a single space.
-            if c == ' ' && out.ends_with(' ') {
-                continue;
-            }
             out.push(c);
         }
     }
-    // If we recorded a candidate truncation point, only truncate if the
-    // text after it contains no sentence-ending punctuation (terminal noise).
-    // Multi-sentence messages will have punctuation in both halves.
-    if let Some(trunc_pos) = truncate_candidate {
-        let tail = &out[trunc_pos..];
-        if !tail.contains('.') && !tail.contains('!') && !tail.contains('?') {
-            out.truncate(trunc_pos);
+
+    // Extract content between ``` fences.
+    if let Some(start) = out.find("```") {
+        let after_open = start + 3;
+        if let Some(end) = out[after_open..].find("```") {
+            return out[after_open..after_open + end].trim().to_string();
         }
     }
-    // Strip Claude Code streaming status indicators. The agent's Ink-based
-    // TUI renders spinner + status text (e.g. "thinking with high effort")
-    // on the same PTY line as dispatch message output. After ANSI codes are
-    // stripped, these appear as plain text noise appended to the message.
-    while let Some(start) = out.find("(thinking") {
-        if let Some(rel_end) = out[start..].find(')') {
-            out.replace_range(start..start + rel_end + 1, "");
-        } else {
-            break;
-        }
-    }
-    // Truncate at closing ") from echo command — everything after is terminal noise.
-    let out = out.trim();
-    let out = match out.find("\")") {
-        Some(pos) => &out[..pos],
-        None => out,
-    };
-    // Strip trailing quote characters left over from shell command echo
-    // (e.g. `echo "@@DISPATCH_MSG:msg"` output may include trailing `"`).
-    let out = out.trim_end_matches('"').trim_end_matches('\'');
-    // Strip trailing noise after the last sentence-ending punctuation.
-    // Dispatch messages always end with punctuation; anything after the last
-    // '.', '!', or '?' is terminal noise (spinner chars, partial redraws).
-    // Heuristic: if no alphabetic run in the tail is longer than 3 chars,
-    // it's noise (e.g. "+ a Q n", "U", "hi g n") rather than real words.
-    let out = out.trim();
-    if let Some(end) = out.rfind(|c: char| c == '.' || c == '!' || c == '?') {
-        let tail = out[end + 1..].trim();
-        if !tail.is_empty() {
-            let has_real_word = tail
-                .split(|c: char| !c.is_alphabetic())
-                .any(|w| w.len() > 3);
-            if !has_real_word {
-                return out[..=end].trim().to_string();
-            }
-        }
-    }
+
     out.trim().to_string()
 }
 
@@ -207,43 +138,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clean_dispatch_msg_plain() {
+    fn clean_dispatch_msg_fenced() {
         assert_eq!(
-            clean_dispatch_msg("Task received. Working on it now."),
+            clean_dispatch_msg("```Task received. Working on it now.```"),
             "Task received. Working on it now."
         );
     }
 
     #[test]
-    fn clean_dispatch_msg_strips_trailing_double_quote() {
-        // From command echo: echo "@@DISPATCH_MSG:msg" leaves trailing "
+    fn clean_dispatch_msg_fenced_with_trailing_noise() {
         assert_eq!(
-            clean_dispatch_msg("Task received.\""),
+            clean_dispatch_msg("```Task received.``` Ruminating... + a Q n"),
             "Task received."
         );
     }
 
     #[test]
-    fn clean_dispatch_msg_strips_trailing_single_quote() {
+    fn clean_dispatch_msg_fenced_with_ansi() {
         assert_eq!(
-            clean_dispatch_msg("Task received.'"),
-            "Task received."
+            clean_dispatch_msg("\x1b[0m```Done. Fixed the bug.```\x1b[10CRuminating..."),
+            "Done. Fixed the bug."
         );
     }
 
     #[test]
-    fn clean_dispatch_msg_strips_ansi() {
+    fn clean_dispatch_msg_fenced_with_thinking_noise() {
         assert_eq!(
-            clean_dispatch_msg("\x1b[0mTask received.\x1b[0m"),
-            "Task received."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_truncates_at_close_paren_quote() {
-        assert_eq!(
-            clean_dispatch_msg("Task received.\")extra noise"),
-            "Task received."
+            clean_dispatch_msg("```Task complete.``` (thinking with high effort)"),
+            "Task complete."
         );
     }
 
@@ -253,137 +175,19 @@ mod tests {
     }
 
     #[test]
-    fn clean_dispatch_msg_preserves_internal_quotes() {
-        // Quotes in the middle of the message should be preserved.
+    fn clean_dispatch_msg_strips_ansi() {
         assert_eq!(
-            clean_dispatch_msg("Fixed the \"login\" bug."),
-            "Fixed the \"login\" bug."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_truncates_at_cursor_forward() {
-        // Cursor-forward (\x1b[10C) followed by status bar text is terminal noise.
-        assert_eq!(
-            clean_dispatch_msg("Done. Added timestamps.\x1b[10Cthinking with high effort"),
-            "Done. Added timestamps."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_truncates_at_cursor_position() {
-        // Cursor-position (\x1b[1;40H) followed by noise.
-        assert_eq!(
-            clean_dispatch_msg("Task complete.\x1b[1;40Hstatus text"),
-            "Task complete."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_ignores_cursor_move_before_content() {
-        // Cursor movement before any message content should not truncate.
-        assert_eq!(
-            clean_dispatch_msg("\x1b[CTask received."),
+            clean_dispatch_msg("\x1b[0m```Task received.```\x1b[0m"),
             "Task received."
         );
     }
 
     #[test]
-    fn clean_dispatch_msg_skips_cursor_move_mid_message() {
-        // TUI redraws can insert cursor positioning mid-message (e.g. Ink
-        // layout repositioning). Cursor movement after non-punctuation
-        // content should NOT truncate — only after a complete sentence.
+    fn clean_dispatch_msg_unfenced_passthrough() {
+        // Unfenced messages pass through with ANSI stripped.
         assert_eq!(
-            clean_dispatch_msg("Task\x1b[15;20H received. Working on it now."),
-            "Task received. Working on it now."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_skips_cursor_move_after_partial_word() {
-        // Cursor movement after a partial word (no punctuation) should not truncate.
-        assert_eq!(
-            clean_dispatch_msg("Working\x1b[10C on the fix."),
-            "Working on the fix."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_preserves_multi_sentence() {
-        // Cursor movement between sentences should not truncate when both
-        // halves contain sentence-ending punctuation.
-        assert_eq!(
-            clean_dispatch_msg("Task received.\x1b[1;30H Working on it now."),
-            "Task received. Working on it now."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_preserves_long_multi_sentence() {
-        // Multi-sentence messages with cursor repositioning throughout.
-        assert_eq!(
-            clean_dispatch_msg("Done.\x1b[1;20H Fixed the bug.\x1b[1;40H Pushed to remote."),
-            "Done. Fixed the bug. Pushed to remote."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_truncates_at_cursor_home_absolute() {
-        // CHA (\x1b[1G) is used by Ink to move cursor to column 1 for
-        // redraws. Noise after it should be truncated.
-        assert_eq!(
-            clean_dispatch_msg("Task received.\x1b[1Gspinner text"),
+            clean_dispatch_msg("Task received."),
             "Task received."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_strips_thinking_status() {
-        // Claude Code's Ink TUI renders "(thinking with high effort)" as
-        // status text that can leak into dispatch messages.
-        assert_eq!(
-            clean_dispatch_msg("Task received. Working on it now. + a Q n (thinking with high effort)"),
-            "Task received. Working on it now."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_strips_multiple_thinking() {
-        // Multiple thinking indicators interspersed with noise chars.
-        assert_eq!(
-            clean_dispatch_msg("Task received. Working on it now. hi g (thinking with high effort) n (thinking with high effort)"),
-            "Task received. Working on it now."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_strips_thinking_variants() {
-        assert_eq!(
-            clean_dispatch_msg("Done.(thinking)"),
-            "Done."
-        );
-        assert_eq!(
-            clean_dispatch_msg("Done. (thinking with medium effort) x"),
-            "Done."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_strips_trailing_spinner_chars() {
-        // After thinking patterns are removed, remaining single-char noise
-        // (spinner artifacts) should be stripped.
-        assert_eq!(
-            clean_dispatch_msg("Task complete. + a Q n"),
-            "Task complete."
-        );
-    }
-
-    #[test]
-    fn clean_dispatch_msg_preserves_real_words_after_punct() {
-        // Real words (>3 alpha chars) after punctuation should be preserved.
-        assert_eq!(
-            clean_dispatch_msg("Done. Merged changes."),
-            "Done. Merged changes."
         );
     }
 }
