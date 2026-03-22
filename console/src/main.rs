@@ -29,7 +29,7 @@ use clap::{Parser, Subcommand};
 use std::{
     io::{self, Write},
     process::Command,
-    sync::{atomic::Ordering, mpsc, Arc, Mutex},
+    sync::{atomic::Ordering, Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -160,9 +160,6 @@ fn main() -> io::Result<()> {
         (cwd.clone(), Workspace::MultiRepo { parent: cwd, repos })
     };
 
-    // Channel for agent status messages from PTY reader threads (dispatch-agentchat).
-    let (agent_msg_tx, agent_msg_rx) = mpsc::channel::<(usize, String)>();
-
     let mut app = App::new(
         cfg.auth.psk.clone(),
         cfg.server.port,
@@ -173,7 +170,6 @@ fn main() -> io::Result<()> {
         workspace,
         cfg.terminal.scrollback_lines,
         chat_tx,
-        agent_msg_tx,
         callsigns.clone(),
         cfg.identity.user_callsign.clone(),
         cfg.identity.console_name.clone(),
@@ -427,8 +423,10 @@ fn main() -> io::Result<()> {
             }
         }
 
-        // dispatch-agentchat: poll agent status messages from PTY reader threads.
-        while let Ok((slot_idx, text)) = agent_msg_rx.try_recv() {
+        // dispatch-agentchat: poll agent message files for new content.
+        // Agents write messages to `.dispatch/messages/{callsign}` files
+        // instead of echoing to the terminal, avoiding PTY noise issues.
+        for (slot_idx, text, is_merge) in pty::poll_agent_messages(&mut app.slots) {
             let callsign = app.slots.get(slot_idx)
                 .and_then(|s| s.as_ref())
                 .map(|s| s.display_name().to_string())
@@ -440,18 +438,12 @@ fn main() -> io::Result<()> {
             if let Some(orch) = &mut app.orchestrator {
                 orch.send_message(&format!("[AGENT_MSG] {}: {}", callsign, text));
             }
-            // Auto-detect merge: when an agent reports merging and pushing,
-            // generate the system merge message for the radio and orch log.
-            // Only fire when no orchestrator is running — when the orchestrator
-            // is active, the merge tool call generates the system message instead
-            // (see execute_tool in app.rs) to avoid duplicates.
-            if app.orchestrator.is_none() {
-                let lower = text.to_lowercase();
-                if lower.contains("merged") && lower.contains("pushed") {
-                    app.push_orch(OrchestratorEventKind::Merged { id: callsign.clone() });
-                    app.push_ticker(format!("MERGED: {}", callsign));
-                    app.push_chat("System", &format!("{} has merged to remote.", callsign));
-                }
+            // Explicit merge signal: agents write `[MERGE] message` to their
+            // message file when they have merged and pushed to remote.
+            if is_merge {
+                app.push_orch(OrchestratorEventKind::Merged { id: callsign.clone() });
+                app.push_ticker(format!("MERGED: {}", callsign));
+                app.push_chat("System", &format!("{} has merged to remote.", callsign));
             }
         }
 
@@ -670,7 +662,6 @@ fn main() -> io::Result<()> {
                                                     Some(&selected_repo), app.scrollback_lines,
                                                     util::repo_name_from_path(&selected_repo), &selected_repo,
                                                     None,
-                                                    app.agent_msg_tx.clone(),
                                                     &cs,
                                                 ) {
                                                     let page = g / SLOTS_PER_PAGE;
@@ -768,7 +759,6 @@ fn main() -> io::Result<()> {
                                             None, app.scrollback_lines,
                                             util::repo_name_from_path(&repo), &repo,
                                             None,
-                                            app.agent_msg_tx.clone(),
                                             &cs,
                                         ) {
                                             let name = slot.display_name().to_string();

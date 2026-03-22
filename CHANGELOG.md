@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.3.9
+
+### Changed
+
+- Agent messaging overhauled from terminal-output-parsing to file-based system. Agents now write messages to `.dispatch/messages/{callsign}` files via `$DISPATCH_MSG_FILE` env var instead of echoing `@@DISPATCH_MSG:` markers to the PTY. Eliminates all ANSI noise, ConPTY artifacts, and TUI redraw issues.
+- Merge detection is now explicit: agents prefix messages with `[MERGE]` instead of the console guessing from keyword matching ("merged" + "pushed").
+- Removed ~250 lines of terminal noise filtering code (ANSI stripping, backtick fence extraction, echo detection, deduplication, line-ending handling).
+
 ## v0.3.8
 
 ### Fixed

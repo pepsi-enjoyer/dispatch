@@ -13,89 +13,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use crate::types::SlotState;
-use crate::util;
-
-/// Marker prefix that agents echo to send chat messages to the radio app.
-/// Usage: `echo "@@DISPATCH_MSG:your message here"`
-pub const DISPATCH_MSG_MARKER: &str = "@@DISPATCH_MSG:";
-
-/// Strip ANSI escape sequences from a string, keeping only visible text.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            match chars.next() {
-                Some('[') => {
-                    // CSI: skip until final byte 0x40-0x7e.
-                    for c2 in chars.by_ref() {
-                        if ('\x40'..='\x7e').contains(&c2) { break; }
-                    }
-                }
-                Some(']') => {
-                    // OSC: skip until BEL or ST.
-                    let mut prev = '\0';
-                    for c2 in chars.by_ref() {
-                        if c2 == '\x07' || (prev == '\x1b' && c2 == '\\') { break; }
-                        prev = c2;
-                    }
-                }
-                Some(c2) if ('\x40'..='\x5f').contains(&c2) => {}
-                _ => {}
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Check a line buffer for a dispatch marker and send the message if it's new.
-/// Called on line endings (\n, \r\n, \r\r) and on bare \r (before redraw discard).
-///
-/// Filters out false positives from file display (Read tool, cat, etc.) where
-/// the marker string appears as documentation text rather than a real agent echo.
-fn check_dispatch_marker(
-    line_buf: &[u8],
-    marker: &str,
-    sent_msgs: &mut std::collections::HashSet<String>,
-    tx: &std::sync::mpsc::Sender<(usize, String)>,
-    slot_idx: usize,
-) {
-    if let Ok(line) = std::str::from_utf8(line_buf) {
-        // Use rfind to get the LAST occurrence of the marker. When the
-        // terminal renders the shell command echo and its output on the
-        // same line, the last occurrence is the actual output.
-        if let Some(pos) = line.rfind(marker) {
-            // Strip ANSI escape sequences from the text before the marker
-            // so syntax highlighting doesn't interfere with filtering.
-            let prefix = strip_ansi(&line[..pos]);
-
-            // Filter 1: Skip shell command lines containing "echo".
-            if prefix.as_bytes().windows(4).any(|w| w == b"echo") {
-                return;
-            }
-
-            // Filter 2: Skip lines with substantial visible content before
-            // the marker. Real markers appear at or near line start (output
-            // of an echo command, 0-2 visible chars). File display (Read
-            // tool, cat -n, markdown prose) always has preceding context
-            // (line numbers, text, code) producing 10+ visible characters.
-            let visible_count = prefix.chars()
-                .filter(|c| !c.is_whitespace() && !c.is_control())
-                .count();
-            if visible_count > 8 {
-                return;
-            }
-
-            let msg = util::clean_dispatch_msg(&line[pos + marker.len()..]);
-            if !msg.is_empty() && !sent_msgs.contains(&msg) {
-                sent_msgs.insert(msg.clone());
-                let _ = tx.send((slot_idx, msg));
-            }
-        }
-    }
-}
 
 /// Ensure `.dispatch/MEMORY.md` exists in the repo root with a starter template.
 /// Called before spawning an agent so shared memory is always available.
@@ -126,10 +43,25 @@ fn read_memory_file(repo_root: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
+/// Ensure `.dispatch/messages/` directory exists in the repo root.
+fn ensure_messages_dir(repo_root: &str) {
+    let dir = format!("{}/.dispatch/messages", repo_root);
+    let _ = std::fs::create_dir_all(&dir);
+}
+
+/// Prepare the agent's message file: delete any stale file and return the path.
+/// Called before spawning so the new agent starts with a clean file.
+pub fn prepare_msg_file(repo_root: &str, callsign: &str) -> String {
+    ensure_messages_dir(repo_root);
+    let path = format!("{}/.dispatch/messages/{}", repo_root, callsign);
+    // Remove stale file from a previous agent with the same callsign.
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
 /// Open a PTY and spawn a process. Returns a SlotState on success.
 /// `cwd` sets the working directory for the PTY (dispatch-xje: worktree path).
 /// `initial_prompt` is passed as a CLI argument so the agent starts working immediately.
-/// `agent_msg_tx` receives (slot_index, message_text) when the agent emits a @@DISPATCH_MSG marker.
 pub fn dispatch_slot(
     global_idx: usize,
     tool_key: &str,
@@ -141,7 +73,6 @@ pub fn dispatch_slot(
     repo_name: &str,
     repo_root: &str,
     initial_prompt: Option<&str>,
-    agent_msg_tx: std::sync::mpsc::Sender<(usize, String)>,
     callsign: &str,
 ) -> Option<SlotState> {
     let pty_system = native_pty_system();
@@ -166,6 +97,13 @@ pub fn dispatch_slot(
     };
     // Ensure shared memory file exists for this repo.
     ensure_memory_file(repo_root);
+
+    // Prepare message file for this agent (file-based messaging).
+    let msg_file = prepare_msg_file(repo_root, callsign);
+
+    // Set DISPATCH_MSG_FILE env var so the agent can write messages to a file
+    // instead of echoing to the terminal. This eliminates terminal noise issues.
+    cmd.env("DISPATCH_MSG_FILE", &msg_file);
 
     // Inject agent instructions from docs/AGENTS.md as system prompt,
     // with shared memory appended so agents benefit from prior learnings.
@@ -207,72 +145,19 @@ pub fn dispatch_slot(
     let last_output_w = Arc::clone(&last_output_at);
     let mut pty_reader = pair.master.try_clone_reader().ok()?;
 
+    // PTY reader thread: updates the VT100 screen buffer and idle timestamp.
+    // Agent messages are read from the message file by the main loop, not
+    // extracted from the PTY stream.
+    let _slot_idx = global_idx;
     thread::spawn(move || {
         let mut child = child;
         let mut buf = [0u8; 4096];
-        let mut line_buf: Vec<u8> = Vec::with_capacity(512);
-        let mut sent_msgs = std::collections::HashSet::new();
-        // Track whether the last byte was \r so we can distinguish
-        // \r\n (normal line ending) from bare \r (terminal redraw).
-        let mut cr_pending = false;
         loop {
             match pty_reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     // Update last output timestamp for idle detection.
                     *last_output_w.lock().unwrap() = Instant::now();
-
-                    // Scan for @@DISPATCH_MSG: markers in the byte stream.
-                    //
-                    // Only process the line buffer on true line endings (\n
-                    // or \r\n). Bare \r (cursor-home for terminal redraws)
-                    // clears the buffer WITHOUT checking for markers, so
-                    // progressive redraws don't emit duplicate partial
-                    // messages.
-                    //
-                    // Special case: \r\r\n (common on Windows where the
-                    // shell outputs \r\n and the PTY adds another \r) must
-                    // still be detected. When \r follows a pending \r, we
-                    // process the buffer before resetting.
-                    for &byte in &buf[..n] {
-                        if cr_pending {
-                            cr_pending = false;
-                            if byte == b'\n' {
-                                // \r\n — normal line ending. Process the buffer.
-                                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &agent_msg_tx, global_idx);
-                                line_buf.clear();
-                                continue;
-                            }
-                            if byte == b'\r' {
-                                // \r\r — the first \r was a real line ending;
-                                // process the buffer, then track this new \r.
-                                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &agent_msg_tx, global_idx);
-                                line_buf.clear();
-                                cr_pending = true;
-                                continue;
-                            }
-                            // Bare \r followed by content — terminal redraw.
-                            // Still check for markers before discarding: TUI
-                            // renderers (Ink/ConPTY) may write the marker then
-                            // reposition the cursor with \r in the same pass.
-                            // Dedup (last_msg) prevents duplicate emissions.
-                            check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &agent_msg_tx, global_idx);
-                            line_buf.clear();
-                            // Fall through to handle the current byte.
-                        }
-                        if byte == b'\r' {
-                            cr_pending = true;
-                        } else if byte == b'\n' {
-                            // Bare \n — process the line.
-                            check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &agent_msg_tx, global_idx);
-                            line_buf.clear();
-                        } else {
-                            line_buf.push(byte);
-                            if line_buf.len() > 4096 {
-                                line_buf.clear();
-                            }
-                        }
-                    }
                     screen_w.lock().unwrap().process(&buf[..n]);
                 }
             }
@@ -302,6 +187,8 @@ pub fn dispatch_slot(
         last_output_at,
         idle: false,
         scroll_offset: 0,
+        msg_file,
+        msg_offset: 0,
     })
 }
 
@@ -342,253 +229,40 @@ pub fn resize_all_slots(slots: &mut [Option<SlotState>], new_size: PtySize) {
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::mpsc;
-
-    fn run_marker_check(line: &str) -> Option<String> {
-        let (tx, rx) = mpsc::channel();
-        let mut sent_msgs = std::collections::HashSet::new();
-        check_dispatch_marker(
-            line.as_bytes(),
-            DISPATCH_MSG_MARKER,
-            &mut sent_msgs,
-            &tx,
-            0,
-        );
-        rx.try_recv().ok().map(|(_, msg)| msg)
-    }
-
-    #[test]
-    fn marker_detected_at_line_start() {
-        let msg = run_marker_check("@@DISPATCH_MSG:Task received.");
-        assert_eq!(msg.as_deref(), Some("Task received."));
-    }
-
-    #[test]
-    fn marker_detected_with_ansi_prefix() {
-        let msg = run_marker_check("\x1b[0m@@DISPATCH_MSG:Task received.");
-        assert_eq!(msg.as_deref(), Some("Task received."));
-    }
-
-    #[test]
-    fn marker_filtered_on_echo_command_line() {
-        let msg = run_marker_check("echo \"@@DISPATCH_MSG:Task received.\"");
-        assert_eq!(msg, None);
-    }
-
-    #[test]
-    fn marker_filtered_with_prompt_and_echo() {
-        let msg = run_marker_check("$ echo \"@@DISPATCH_MSG:Task received.\"");
-        assert_eq!(msg, None);
-    }
-
-    #[test]
-    fn marker_filtered_when_command_and_output_same_line() {
-        // With a 64-byte echo window, when command and output happen to
-        // appear on the same terminal line, both markers are filtered
-        // because "echo" falls within the window for both. In practice,
-        // ConPTY always separates command echo and output with \r\n so
-        // this degenerate case does not arise.
-        let line = "echo \"@@DISPATCH_MSG:Task received.\" => @@DISPATCH_MSG:Task received.";
-        let msg = run_marker_check(line);
-        assert_eq!(msg, None);
-    }
-
-    #[test]
-    fn marker_detected_with_long_prompt_prefix() {
-        // Long directory prompt should not interfere with output detection
-        // on separate lines (the realistic case on ConPTY).
-        let msg = run_marker_check("@@DISPATCH_MSG:Task received. Working on it now.");
-        assert_eq!(msg.as_deref(), Some("Task received. Working on it now."));
-    }
-
-    #[test]
-    fn marker_detected_with_indentation() {
-        let msg = run_marker_check("  @@DISPATCH_MSG:Task complete.");
-        assert_eq!(msg.as_deref(), Some("Task complete."));
-    }
-
-    #[test]
-    fn dedup_prevents_same_message_twice() {
-        let (tx, rx) = mpsc::channel();
-        let mut sent_msgs = std::collections::HashSet::new();
-        let line = b"@@DISPATCH_MSG:Task received.";
-        check_dispatch_marker(line, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
-        check_dispatch_marker(line, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
-        // Only one message should be sent.
-        assert!(rx.try_recv().is_ok());
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn echo_filtered_with_multibyte_utf8() {
-        // When a multi-byte UTF-8 char (e.g. ⏺ = 3 bytes) sits before
-        // the marker, the echo check must not panic.
-        let line = "\x1b[1m⏺\x1b[0m Bash: echo \"@@DISPATCH_MSG:Task received.\"";
-        // This is a command line — should be filtered (contains echo).
-        let msg = run_marker_check(line);
-        assert_eq!(msg, None);
-    }
-
-    #[test]
-    fn marker_passes_with_short_unicode_prefix() {
-        // A few multi-byte box-drawing chars before the marker (≤ 8 visible).
-        let line = "──── @@DISPATCH_MSG:Task complete.";
-        let msg = run_marker_check(line);
-        assert_eq!(msg.as_deref(), Some("Task complete."));
-    }
-
-    #[test]
-    fn marker_filtered_in_file_display_prose() {
-        // When an agent reads ARCHITECTURE.md, documentation text containing
-        // the marker string appears in the PTY. The visible prefix is long
-        // enough to filter it out.
-        let line = "**Agent status messages:** Agents echo `@@DISPATCH_MSG:` markers";
-        let msg = run_marker_check(line);
-        assert_eq!(msg, None);
-    }
-
-    #[test]
-    fn marker_filtered_in_file_display_with_line_numbers() {
-        // Read tool output format: line numbers + file content.
-        let line = "    33\techo \"@@DISPATCH_MSG:Task received.\"";
-        let msg = run_marker_check(line);
-        assert_eq!(msg, None);
-    }
-
-    #[test]
-    fn marker_filtered_in_markdown_example() {
-        // Markdown inline code showing the marker usage in AGENTS.md.
-        let line = "  - Made changes: `echo \"@@DISPATCH_MSG:Done. Fixed X.\"`";
-        let msg = run_marker_check(line);
-        assert_eq!(msg, None);
-    }
-
-    #[test]
-    fn marker_filtered_with_ansi_inflated_echo() {
-        // ANSI codes between "echo" and marker that would have exceeded the
-        // old 64-byte window. Now works because ANSI is stripped first.
-        let line = "\x1b[32mecho\x1b[0m \x1b[33m\"\x1b[0m\x1b[31m\x1b[1m\x1b[4m\x1b[35m\x1b[42m\x1b[48;5;200m@@DISPATCH_MSG:Task received.";
-        let msg = run_marker_check(line);
-        assert_eq!(msg, None);
-    }
-
-    /// Simulate the full byte processing loop to test bare-\r marker recovery.
-    fn simulate_pty_bytes(input: &[u8]) -> Vec<String> {
-        let (tx, rx) = mpsc::channel();
-        let mut line_buf: Vec<u8> = Vec::with_capacity(512);
-        let mut sent_msgs = std::collections::HashSet::new();
-        let mut cr_pending = false;
-        for &byte in input {
-            if cr_pending {
-                cr_pending = false;
-                if byte == b'\n' {
-                    check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
-                    line_buf.clear();
-                    continue;
-                }
-                if byte == b'\r' {
-                    check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
-                    line_buf.clear();
-                    cr_pending = true;
-                    continue;
-                }
-                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
-                line_buf.clear();
-            }
-            if byte == b'\r' {
-                cr_pending = true;
-            } else if byte == b'\n' {
-                check_dispatch_marker(&line_buf, DISPATCH_MSG_MARKER, &mut sent_msgs, &tx, 0);
-                line_buf.clear();
-            } else {
-                line_buf.push(byte);
-                if line_buf.len() > 4096 {
-                    line_buf.clear();
+/// Poll agent message files for new content. Returns (slot_index, text, is_merge).
+/// Each agent writes messages to `.dispatch/messages/{callsign}`, one per line.
+/// Lines starting with `[MERGE]` signal that the agent has merged and pushed.
+pub fn poll_agent_messages(slots: &mut [Option<SlotState>]) -> Vec<(usize, String, bool)> {
+    let mut messages = Vec::new();
+    for (i, slot) in slots.iter_mut().enumerate() {
+        if let Some(s) = slot {
+            if let Ok(meta) = std::fs::metadata(&s.msg_file) {
+                let len = meta.len();
+                if len > s.msg_offset {
+                    if let Ok(mut file) = std::fs::File::open(&s.msg_file) {
+                        use std::io::{Seek, SeekFrom};
+                        let _ = file.seek(SeekFrom::Start(s.msg_offset));
+                        let mut buf = String::new();
+                        if file.read_to_string(&mut buf).is_ok() {
+                            for line in buf.lines() {
+                                let line = line.trim();
+                                if line.is_empty() {
+                                    continue;
+                                }
+                                if let Some(rest) = line.strip_prefix("[MERGE]") {
+                                    messages.push((i, rest.trim().to_string(), true));
+                                } else {
+                                    messages.push((i, line.to_string(), false));
+                                }
+                            }
+                        }
+                        s.msg_offset = len;
+                    }
                 }
             }
         }
-        let mut msgs = Vec::new();
-        while let Ok((_, msg)) = rx.try_recv() {
-            msgs.push(msg);
-        }
-        msgs
     }
-
-    #[test]
-    fn bare_cr_does_not_lose_marker() {
-        // ConPTY / TUI redraw: marker text followed by bare \r then new content.
-        // Before the fix, the bare \r discarded the buffer and the marker was lost.
-        let input = b"@@DISPATCH_MSG:Task received.\rMore content\r\n";
-        let msgs = simulate_pty_bytes(input);
-        assert_eq!(msgs, vec!["Task received."]);
-    }
-
-    #[test]
-    fn marker_via_normal_crlf_still_works() {
-        let input = b"@@DISPATCH_MSG:Task received.\r\n";
-        let msgs = simulate_pty_bytes(input);
-        assert_eq!(msgs, vec!["Task received."]);
-    }
-
-    #[test]
-    fn marker_via_double_cr_lf_still_works() {
-        // Windows \r\r\n line ending.
-        let input = b"@@DISPATCH_MSG:Task received.\r\r\n";
-        let msgs = simulate_pty_bytes(input);
-        assert_eq!(msgs, vec!["Task received."]);
-    }
-
-    #[test]
-    fn bare_cr_dedup_prevents_double_emit() {
-        // Marker on a line that ends with \r then gets redrawn with the same
-        // marker. The bare-\r check emits the first, dedup prevents the second.
-        let input = b"@@DISPATCH_MSG:Task received.\r@@DISPATCH_MSG:Task received.\r\n";
-        let msgs = simulate_pty_bytes(input);
-        assert_eq!(msgs, vec!["Task received."]);
-    }
-
-    #[test]
-    fn echo_command_filtered_in_byte_stream() {
-        // The echo command line should be filtered, output line detected.
-        let input = b"echo \"@@DISPATCH_MSG:Task received.\"\r\n@@DISPATCH_MSG:Task received.\r\n";
-        let msgs = simulate_pty_bytes(input);
-        assert_eq!(msgs, vec!["Task received."]);
-    }
-
-    #[test]
-    fn tui_redraw_cycling_messages_deduped() {
-        // When a TUI (Ink) re-renders, it outputs the full terminal content
-        // again, including previous @@DISPATCH_MSG markers. With multiple
-        // different messages (A, B, C), they cycle on each redraw. The
-        // HashSet-based dedup must prevent re-emission even when different
-        // messages interleave (which defeated the old last_msg == check).
-        let mut input = Vec::new();
-        // First render: three distinct messages.
-        input.extend_from_slice(b"@@DISPATCH_MSG:Task received.\r\n");
-        input.extend_from_slice(b"@@DISPATCH_MSG:Working on fix.\r\n");
-        input.extend_from_slice(b"@@DISPATCH_MSG:Done. Fixed the bug.\r\n");
-        // Second render (TUI redraw): same three messages again.
-        input.extend_from_slice(b"@@DISPATCH_MSG:Task received.\r\n");
-        input.extend_from_slice(b"@@DISPATCH_MSG:Working on fix.\r\n");
-        input.extend_from_slice(b"@@DISPATCH_MSG:Done. Fixed the bug.\r\n");
-        // Third render: same again.
-        input.extend_from_slice(b"@@DISPATCH_MSG:Task received.\r\n");
-        input.extend_from_slice(b"@@DISPATCH_MSG:Working on fix.\r\n");
-        input.extend_from_slice(b"@@DISPATCH_MSG:Done. Fixed the bug.\r\n");
-
-        let msgs = simulate_pty_bytes(&input);
-        // Each message should appear exactly once despite three re-renders.
-        assert_eq!(msgs, vec![
-            "Task received.",
-            "Working on fix.",
-            "Done. Fixed the bug.",
-        ]);
-    }
+    messages
 }
 
 pub fn key_to_pty_bytes(key: &KeyEvent) -> Vec<u8> {
