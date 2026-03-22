@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Changed
 
 - Agent messaging overhauled from terminal-output-parsing to file-based system. Agents now write messages to `.dispatch/messages/{callsign}` files via `$DISPATCH_MSG_FILE` env var instead of echoing `@@DISPATCH_MSG:` markers to the PTY. Eliminates all ANSI noise, ConPTY artifacts, and TUI redraw issues.
-- Merge detection is now explicit: agents prefix messages with `[MERGE]` instead of the console guessing from keyword matching ("merged" + "pushed").
+- Removed system merge messages. Agents self-report merge status in their own messages instead of the console generating a separate "X has merged to remote" notification.
 - Removed ~250 lines of terminal noise filtering code (ANSI stripping, backtick fence extraction, echo detection, deduplication, line-ending handling).
 
 ## v0.3.8

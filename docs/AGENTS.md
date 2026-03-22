@@ -27,12 +27,6 @@ Send messages at these points:
 - **When you have findings to report:** If your task is a question, investigation, or research task, you MUST send your answer back as a status message. The Console and Dispatch cannot see your internal reasoning -- they ONLY see what you send via the message file. If you do not send a message, your work is invisible and wasted.
 - **When Dispatch sends you a direct message:** Reply naturally via the message file -- keep replies short and conversational.
 
-**Signaling a merge:** When you merge and push your changes, prefix the message with `[MERGE]` so the Console generates the system merge notification:
-
-```bash
-echo "[MERGE] Done. Fixed X, committed, merged, and pushed." >> "$DISPATCH_MSG_FILE"
-```
-
 **CRITICAL: Every task MUST end with at least one status message.** Never silently return to the prompt. Whether you made changes, found an answer, or hit a problem -- send a message. This is the ONLY way your results reach Dispatch. Returning to the prompt without sending a message means your task produced no output and will be treated as a failure.
 
 Keep messages to one sentence. Do not include file paths or code.
@@ -54,9 +48,9 @@ Keep messages to one sentence. Do not include file paths or code.
    git branch -d dispatch/{callsign}
    git push
    ```
-5. **Send a final status message with `[MERGE]` prefix.** This is mandatory -- never skip it.
-   - For code tasks: `echo "[MERGE] Done. Fixed X, committed, merged, and pushed." >> "$DISPATCH_MSG_FILE"`
-   - For research/investigation tasks: send your findings or answer (with `[MERGE]` prefix if you merged). This is the ONLY way your results reach Console and Dispatch. If you investigated something and don't send a message with what you found, your work is lost.
+5. **Send a final status message.** This is mandatory -- never skip it.
+   - For code tasks: report what you changed, committed, and pushed.
+   - For research/investigation tasks: send your findings or answer. This is the ONLY way your results reach Console and Dispatch. If you investigated something and don't send a message with what you found, your work is lost.
 6. Return to the prompt and wait. The Console's completion detector watches for an idle prompt -- do not leave a command running or output streaming.
 
 If the merge fails due to conflicts: `git pull origin main`, retry the merge, fix conflicts manually if needed (`git add` + `git commit`), then push and clean up as normal.
