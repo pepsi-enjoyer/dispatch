@@ -229,10 +229,9 @@ pub fn resize_all_slots(slots: &mut [Option<SlotState>], new_size: PtySize) {
     }
 }
 
-/// Poll agent message files for new content. Returns (slot_index, text, is_merge).
+/// Poll agent message files for new content. Returns (slot_index, text).
 /// Each agent writes messages to `.dispatch/messages/{callsign}`, one per line.
-/// Lines starting with `[MERGE]` signal that the agent has merged and pushed.
-pub fn poll_agent_messages(slots: &mut [Option<SlotState>]) -> Vec<(usize, String, bool)> {
+pub fn poll_agent_messages(slots: &mut [Option<SlotState>]) -> Vec<(usize, String)> {
     let mut messages = Vec::new();
     for (i, slot) in slots.iter_mut().enumerate() {
         if let Some(s) = slot {
@@ -246,13 +245,8 @@ pub fn poll_agent_messages(slots: &mut [Option<SlotState>]) -> Vec<(usize, Strin
                         if file.read_to_string(&mut buf).is_ok() {
                             for line in buf.lines() {
                                 let line = line.trim();
-                                if line.is_empty() {
-                                    continue;
-                                }
-                                if let Some(rest) = line.strip_prefix("[MERGE]") {
-                                    messages.push((i, rest.trim().to_string(), true));
-                                } else {
-                                    messages.push((i, line.to_string(), false));
+                                if !line.is_empty() {
+                                    messages.push((i, line.to_string()));
                                 }
                             }
                         }

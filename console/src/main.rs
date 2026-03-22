@@ -426,7 +426,7 @@ fn main() -> io::Result<()> {
         // dispatch-agentchat: poll agent message files for new content.
         // Agents write messages to `.dispatch/messages/{callsign}` files
         // instead of echoing to the terminal, avoiding PTY noise issues.
-        for (slot_idx, text, is_merge) in pty::poll_agent_messages(&mut app.slots) {
+        for (slot_idx, text) in pty::poll_agent_messages(&mut app.slots) {
             let callsign = app.slots.get(slot_idx)
                 .and_then(|s| s.as_ref())
                 .map(|s| s.display_name().to_string())
@@ -437,13 +437,6 @@ fn main() -> io::Result<()> {
             // visibility into agent progress (e.g. "Task received", "Merging").
             if let Some(orch) = &mut app.orchestrator {
                 orch.send_message(&format!("[AGENT_MSG] {}: {}", callsign, text));
-            }
-            // Explicit merge signal: agents write `[MERGE] message` to their
-            // message file when they have merged and pushed to remote.
-            if is_merge {
-                app.push_orch(OrchestratorEventKind::Merged { id: callsign.clone() });
-                app.push_ticker(format!("MERGED: {}", callsign));
-                app.push_chat("System", &format!("{} has merged to remote.", callsign));
             }
         }
 

@@ -126,7 +126,7 @@ Each slot holds one running agent process in a PTY. Slots are indexed 0-based in
 
 **Idle detection:** If an agent with a task ID produces no output for 10 seconds, it's marked idle and an `[EVENT] AGENT_IDLE` is sent to the orchestrator. New output transitions it back to working.
 
-**Agent status messages:** Agents write messages to `.dispatch/messages/{callsign}` files (one line per message). The main loop polls these files for new content and forwards messages to the orchestrator and radio. Lines prefixed with `[MERGE]` trigger the system merge notification. This file-based approach eliminates the fragile terminal-output-parsing system that was prone to ANSI noise and ConPTY artifacts.
+**Agent status messages:** Agents write messages to `.dispatch/messages/{callsign}` files (one line per message). The main loop polls these files for new content and forwards messages to the orchestrator and radio. This file-based approach eliminates the fragile terminal-output-parsing system that was prone to ANSI noise and ConPTY artifacts.
 
 ### Event Loop (main.rs)
 
@@ -335,7 +335,7 @@ Orchestrator calls dispatch(repo, prompt, callsign)
   ├─ Agent works, commits on dispatch/{callsign} branch
   ├─ Agent merges to main, removes worktree, pushes
   │
-  ├─ Agent writes "[MERGE] Done. Fixed X, merged and pushed." to message file
+  ├─ Agent writes "Done. Fixed X, merged and pushed." to message file
   │
   ├─ Agent goes idle at prompt
   │    └─ Console detects 10s inactivity → AGENT_IDLE event
