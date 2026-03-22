@@ -3,18 +3,21 @@ package com.dispatch.radio
 import android.app.AlertDialog
 import android.content.Context
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.graphics.Typeface
 import com.dispatch.radio.model.Agent
+import com.dispatch.radio.model.callsignColor
 
 /**
  * Shows a hold-to-view overlay listing all active agent statuses.
  *
- * Each line displays the callsign on the left and its status on the right,
- * colored RED for working and YELLOW for idle. Agents are listed in slot order
+ * Each row shows a colored status dot, the callsign in its unique color,
+ * and the status text on the right. Agents are listed in slot order
  * (earliest dispatched first). The caller dismisses when the button is released.
  */
 class AgentStatusOverlay(private val context: Context) {
@@ -26,72 +29,127 @@ class AgentStatusOverlay(private val context: Context) {
 
         val font = Typeface.MONOSPACE
         val active = agents.filter { it.status != "empty" }.sortedBy { it.slot }
+        val dp = context.resources.displayMetrics.density
 
-        val layout = LinearLayout(context).apply {
+        // --- Title bar with rule ---
+        val titleLayout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(48, 24, 48, 24)
+            setPadding((24 * dp).toInt(), (20 * dp).toInt(), (24 * dp).toInt(), 0)
         }
 
-        val titleView = TextView(context).apply {
+        titleLayout.addView(TextView(context).apply {
             text = "AGENT STATUS"
             setTextColor(Color.WHITE)
-            textSize = 18f
+            textSize = 16f
             typeface = font
-            setPadding(48, 36, 48, 12)
+            letterSpacing = 0.15f
+        })
+
+        // Thin horizontal rule under title
+        titleLayout.addView(View(context).apply {
+            setBackgroundColor(0xFF333333.toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, (1 * dp).toInt()
+            ).apply { topMargin = (12 * dp).toInt() }
+        })
+
+        // --- Content ---
+        val layout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((24 * dp).toInt(), (8 * dp).toInt(), (24 * dp).toInt(), (16 * dp).toInt())
         }
 
         if (active.isEmpty()) {
             layout.addView(TextView(context).apply {
                 text = "No agents online"
-                setTextColor(Color.GRAY)
-                textSize = 16f
+                setTextColor(0xFF666666.toInt())
+                textSize = 14f
                 typeface = font
+                setPadding(0, (16 * dp).toInt(), 0, (8 * dp).toInt())
             })
         } else {
-            for (agent in active) {
-                val row = LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    setPadding(0, 12, 0, 12)
+            for ((i, agent) in active.withIndex()) {
+                val statusColor = when (agent.status) {
+                    "working" -> 0xFFFF3333.toInt()
+                    "idle" -> 0xFFFFAA00.toInt()
+                    else -> 0xFF666666.toInt()
                 }
 
+                val row = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, (12 * dp).toInt(), 0, (12 * dp).toInt())
+                }
+
+                // Status indicator dot
+                val dot = View(context).apply {
+                    val size = (8 * dp).toInt()
+                    layoutParams = LinearLayout.LayoutParams(size, size).apply {
+                        marginEnd = (12 * dp).toInt()
+                    }
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(statusColor)
+                    }
+                }
+                row.addView(dot)
+
+                // Callsign in its unique color
                 row.addView(TextView(context).apply {
-                    text = agent.callsign
-                    setTextColor(Color.WHITE)
-                    textSize = 18f
+                    text = agent.callsign.uppercase()
+                    setTextColor(callsignColor(agent.callsign))
+                    textSize = 16f
                     typeface = font
                     layoutParams = LinearLayout.LayoutParams(
                         0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
                     )
                 })
 
-                val statusColor = when (agent.status) {
-                    "working" -> Color.RED
-                    "idle" -> Color.YELLOW
-                    else -> Color.GRAY
-                }
-
+                // Status label
                 row.addView(TextView(context).apply {
-                    text = "-"
-                    setTextColor(Color.GRAY)
-                    textSize = 18f
-                    typeface = font
-                    setPadding(16, 0, 16, 0)
-                })
-
-                row.addView(TextView(context).apply {
-                    text = agent.status.replaceFirstChar { it.uppercase() }
+                    text = agent.status.uppercase()
                     setTextColor(statusColor)
-                    textSize = 18f
+                    textSize = 13f
                     typeface = font
                     gravity = Gravity.END
                 })
 
                 layout.addView(row)
+
+                // Divider between rows (not after last)
+                if (i < active.size - 1) {
+                    layout.addView(View(context).apply {
+                        setBackgroundColor(0xFF1A1A1A.toInt())
+                        layoutParams = LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, (1 * dp).toInt()
+                        )
+                    })
+                }
             }
         }
 
+        // --- Summary line ---
+        val working = active.count { it.status == "working" }
+        val idle = active.count { it.status == "idle" }
+        if (active.isNotEmpty()) {
+            layout.addView(View(context).apply {
+                setBackgroundColor(0xFF333333.toInt())
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, (1 * dp).toInt()
+                ).apply { topMargin = (4 * dp).toInt() }
+            })
+
+            layout.addView(TextView(context).apply {
+                text = "${active.size} ONLINE  /  $working WORKING  /  $idle IDLE"
+                setTextColor(0xFF666666.toInt())
+                textSize = 11f
+                typeface = font
+                setPadding(0, (12 * dp).toInt(), 0, 0)
+            })
+        }
+
         dialog = AlertDialog.Builder(context, R.style.Theme_DispatchRadio_Dialog)
-            .setCustomTitle(titleView)
+            .setCustomTitle(titleLayout)
             .setView(layout)
             .setCancelable(false)
             .create()
