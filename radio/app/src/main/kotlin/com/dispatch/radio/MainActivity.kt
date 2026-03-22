@@ -140,6 +140,9 @@ class MainActivity : AppCompatActivity() {
             onError = {
                 flListening.visibility = View.INVISIBLE
                 wsClient?.send("""{"type":"radio_status","state":"idle"}""")
+            },
+            onRmsChanged = { level ->
+                audioLevelView.level = level
             }
         )
 
@@ -486,10 +489,12 @@ class MainActivity : AppCompatActivity() {
                         tvListeningLabel.text = "LISTENING"
                         flListening.visibility = View.VISIBLE
                         tvPartial.text = ""
+                        audioLevelView.level = 0f
                     },
                     onPartialResult = { partial -> tvPartial.text = partial },
                     onFinalResult = { transcript ->
                         flListening.visibility = View.INVISIBLE
+                        audioLevelView.level = 0f
                         haptics.sendConfirm()
                         wsClient?.send("""{"type":"radio_status","state":"idle"}""")
                         handleTranscript(transcript)
@@ -502,6 +507,9 @@ class MainActivity : AppCompatActivity() {
                     onError = {
                         flListening.visibility = View.INVISIBLE
                         wsClient?.send("""{"type":"radio_status","state":"idle"}""")
+                    },
+                    onRmsChanged = { level ->
+                        audioLevelView.level = level
                     }
                 )
                 initContinuousManager()

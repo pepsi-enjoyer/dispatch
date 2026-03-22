@@ -28,7 +28,8 @@ class PushToTalkManager(
     val onPartialResult: (String) -> Unit,
     val onFinalResult: (String) -> Unit,
     val onEmptyTranscript: () -> Unit,
-    val onError: (Int) -> Unit
+    val onError: (Int) -> Unit,
+    val onRmsChanged: (Float) -> Unit = {}
 ) {
 
     private var recognizer: SpeechRecognizer? = null
@@ -40,6 +41,11 @@ class PushToTalkManager(
     private var accumulatedTranscript = ""
 
     private val handler = Handler(Looper.getMainLooper())
+
+    init {
+        // Pre-warm the recognizer so the first PTT press doesn't include init latency.
+        ensureRecognizer()
+    }
 
     /** Call from onKeyDown for KEYCODE_VOLUME_DOWN. */
     fun startListening() {
@@ -87,7 +93,10 @@ class PushToTalkManager(
         // Suppress silence-based cutoff while key is held
         putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 60000L)
         putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 60000L)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 60000L)
+        // Keep minimum length low so the recognizer starts delivering partial results
+        // immediately rather than buffering audio for a long expected utterance.
+        // The silence-length extras above already prevent auto-stop.
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
     }
 
     /** Combine accumulated transcript with the current segment. */
@@ -115,7 +124,13 @@ class PushToTalkManager(
     private val recognitionListener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {}
         override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
+
+        override fun onRmsChanged(rmsdB: Float) {
+            // Normalize RMS to 0.0-1.0 range. SpeechRecognizer reports roughly -2 to 10 dB.
+            val normalized = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
+            onRmsChanged(normalized)
+        }
+
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {}
 
