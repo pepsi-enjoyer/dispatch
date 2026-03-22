@@ -35,6 +35,11 @@ class ContinuousListenManager(
     private var lastPartial = ""
     private val handler = Handler(Looper.getMainLooper())
 
+    init {
+        // Pre-warm the recognizer so the first activation doesn't include init latency.
+        ensureRecognizer()
+    }
+
     val isActive: Boolean get() = active
 
     /** Start continuous listening. Recognizer auto-restarts after each utterance. */
