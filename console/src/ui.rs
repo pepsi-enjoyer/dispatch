@@ -119,7 +119,8 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
             orchestrator::OrchestratorState::Dead => "  ORCH: DEAD",
         },
         Some(_) => "  ORCH: DEAD",
-        None => "  ORCH: READY",
+        None if app.orch_error.is_some() => "  ORCH: FAILED",
+        None => "  ORCH: STARTING",
     };
     let right = format!(
         "PSK: {}  AGENTS: {}/{}{}{}  PAGE {}/{}  {}",

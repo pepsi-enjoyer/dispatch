@@ -150,12 +150,18 @@ fn main() -> io::Result<()> {
     // Broadcast channel for pushing chat messages to all connected radio clients (dispatch-chat).
     let (chat_tx, _) = tokio::sync::broadcast::channel::<String>(256);
 
+    // Channel for WsEvents from the WebSocket thread (dispatch-1lc.1).
+    // Created before the server starts to prevent a race where early
+    // connections could arrive before event_tx is set.
+    let (ws_event_tx, ws_event_rx) = mpsc::channel::<ws_server::WsEvent>();
+
     // Start the WebSocket server with TLS (dispatch-bgz.7, dispatch-ct2.6).
     let ws_state: ws_server::SharedState = Arc::new(Mutex::new({
         let mut state = ws_server::ConsoleState::new(callsigns.clone());
         state.user_callsign = cfg.identity.user_callsign.clone();
         state.console_name = cfg.identity.console_name.clone();
         state.default_tool = cfg.default_tool_key().to_string();
+        state.event_tx = Some(ws_event_tx);
         state
     }));
     {
@@ -230,7 +236,7 @@ fn main() -> io::Result<()> {
     let orch_callsigns = callsigns;
     let orch_user_callsign = cfg.identity.user_callsign.clone();
     let orch_console_name = cfg.identity.console_name.clone();
-    let (orch_ready_tx, orch_ready_rx) = mpsc::channel::<orchestrator::Orchestrator>();
+    let (orch_ready_tx, orch_ready_rx) = mpsc::channel::<Result<orchestrator::Orchestrator, String>>();
     {
         let tx = orch_ready_tx.clone();
         let repos = orch_repos.clone();
@@ -242,9 +248,7 @@ fn main() -> io::Result<()> {
             let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
             let tool_defs = tools::tool_definitions();
             let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn);
-            if let Some(orch) = orchestrator::spawn(&system_prompt, &cwd) {
-                let _ = tx.send(orch);
-            }
+            let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd));
         });
     }
     app.push_ticker("ORCHESTRATOR: starting...".to_string());
@@ -253,13 +257,6 @@ fn main() -> io::Result<()> {
     if app.is_multi_repo() {
         let repo_count = app.repo_list().len();
         app.push_ticker(format!("MULTI-REPO: detected {} repos", repo_count));
-    }
-
-    // Channel for WsEvents from the WebSocket thread (dispatch-1lc.1).
-    let (ws_event_tx, ws_event_rx) = mpsc::channel::<ws_server::WsEvent>();
-    {
-        let mut st = app.ws_state.lock().unwrap();
-        st.event_tx = Some(ws_event_tx);
     }
 
     enable_raw_mode()?;
@@ -361,16 +358,25 @@ fn main() -> io::Result<()> {
         app.tick_status_blink();
 
         // dispatch-guj: pick up background-spawned orchestrator when ready.
-        if app.orchestrator.is_none() {
-            if let Ok(orch) = orch_ready_rx.try_recv() {
-                app.orchestrator = Some(orch);
-                app.push_ticker("ORCHESTRATOR: online".to_string());
-                app.push_chat("System", "Orchestrator online.");
-                // Flush any voice messages that arrived before orchestrator was ready.
-                let pending: Vec<String> = app.pending_voice.drain(..).collect();
-                if let Some(orch) = &mut app.orchestrator {
-                    for msg in pending {
-                        orch.send_message(&format!("[MIC] {}", msg));
+        if app.orchestrator.is_none() && app.orch_error.is_none() {
+            if let Ok(result) = orch_ready_rx.try_recv() {
+                match result {
+                    Ok(orch) => {
+                        app.orchestrator = Some(orch);
+                        app.push_ticker("ORCHESTRATOR: online".to_string());
+                        app.push_chat("System", "Orchestrator online.");
+                        // Flush any voice messages that arrived before orchestrator was ready.
+                        let pending: Vec<String> = app.pending_voice.drain(..).collect();
+                        if let Some(orch) = &mut app.orchestrator {
+                            for msg in pending {
+                                orch.send_message(&format!("[MIC] {}", msg));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        app.orch_error = Some(err.clone());
+                        app.push_ticker(format!("ORCHESTRATOR: {}", err));
+                        app.push_chat("System", &format!("Orchestrator failed: {}", err));
                     }
                 }
             }
@@ -379,8 +385,18 @@ fn main() -> io::Result<()> {
         // Process events from the WebSocket thread (dispatch-1lc.1, dispatch-h62).
         while let Ok(event) = ws_event_rx.try_recv() {
             match event {
-                ws_server::WsEvent::VoiceTranscript { text } => {
+                ws_server::WsEvent::RadioConnected { addr } => {
                     app.radio_state = RadioState::Connected;
+                    app.push_ticker(format!("RADIO: connected from {}", addr));
+                }
+                ws_server::WsEvent::RadioDisconnected { addr } => {
+                    app.radio_state = RadioState::Disconnected;
+                    app.push_ticker(format!("RADIO: disconnected ({})", addr));
+                }
+                ws_server::WsEvent::TlsFailure { addr } => {
+                    app.push_ticker(format!("TLS FAILED: connection from {}", addr));
+                }
+                ws_server::WsEvent::VoiceTranscript { text } => {
                     app.push_orch(OrchestratorEventKind::VoiceTranscript { text: text.clone() });
                     app.push_chat(&app.user_callsign.clone(), &text);
                     if let Some(orch) = &mut app.orchestrator {
@@ -450,6 +466,7 @@ fn main() -> io::Result<()> {
                         orch.interrupt();
                     }
                     app.orchestrator = None;
+                    app.orch_error = None;
                     app.push_ticker("ORCHESTRATOR: interrupted — restarting...".to_string());
                     app.push_chat("System", "Orchestrator interrupted. Restarting...");
                     // Respawn in background.
@@ -463,9 +480,7 @@ fn main() -> io::Result<()> {
                         let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
                         let tool_defs = tools::tool_definitions();
                         let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn);
-                        if let Some(orch) = orchestrator::spawn(&system_prompt, &cwd) {
-                            let _ = tx.send(orch);
-                        }
+                        let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd));
                     });
                 }
             }
@@ -839,6 +854,7 @@ fn main() -> io::Result<()> {
                                         if orch.state == orchestrator::OrchestratorState::Responding {
                                             orch.interrupt();
                                             app.orchestrator = None;
+                                            app.orch_error = None;
                                             app.push_ticker("ORCHESTRATOR: interrupted — restarting...".to_string());
                                             app.push_chat("System", "Orchestrator interrupted. Restarting...");
                                             // Respawn in background.
@@ -852,9 +868,7 @@ fn main() -> io::Result<()> {
                                                 let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
                                                 let tool_defs = tools::tool_definitions();
                                                 let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn);
-                                                if let Some(orch) = orchestrator::spawn(&system_prompt, &cwd) {
-                                                    let _ = tx.send(orch);
-                                                }
+                                                let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd));
                                             });
                                         }
                                     }

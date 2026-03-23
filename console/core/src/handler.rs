@@ -21,6 +21,12 @@ pub enum WsEvent {
     ImageReceived { callsign: String, data: String, filename: String },
     /// Interrupt the orchestrator (cancel current response).
     Interrupt,
+    /// A radio client completed the WebSocket handshake (authenticated).
+    RadioConnected { addr: String },
+    /// A radio client disconnected.
+    RadioDisconnected { addr: String },
+    /// TLS handshake failed (client couldn't establish encrypted connection).
+    TlsFailure { addr: String },
 }
 
 // --- Agent state ---------------------------------------------------------

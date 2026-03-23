@@ -167,6 +167,8 @@ pub struct App {
     pub orch_scroll: usize, // scroll offset from bottom
     // Persistent LLM orchestrator
     pub orchestrator: Option<orchestrator::Orchestrator>,
+    /// Error message if the orchestrator failed to spawn.
+    pub orch_error: Option<String>,
     // Voice messages received before orchestrator is ready.
     pub pending_voice: Vec<String>,
     // Broadcast channel for pushing chat messages to radio clients
