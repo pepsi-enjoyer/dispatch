@@ -120,13 +120,14 @@ fn main() -> io::Result<()> {
     {
         let state = Arc::clone(&ws_state);
         let psk = cfg.auth.psk.clone();
+        let bind = cfg.server.bind.clone();
         let port = cfg.server.port;
         let acceptor = tls.acceptor;
         let chat_tx_ws = chat_tx.clone();
         thread::spawn(move || {
             tokio::runtime::Runtime::new()
                 .expect("tokio runtime")
-                .block_on(ws_server::run_server(state, port, psk, acceptor, chat_tx_ws));
+                .block_on(ws_server::run_server(state, bind, port, psk, acceptor, chat_tx_ws));
         });
     }
 

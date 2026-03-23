@@ -27,10 +27,12 @@ pub type ChatBroadcast = tokio::sync::broadcast::Sender<String>;
 
 // --- Server entry point --------------------------------------------------
 
-/// Start the WebSocket server on `0.0.0.0:{port}` with TLS.
+/// Start the WebSocket server on `{bind}:{port}` with TLS.
 /// Accepts connections only when the `?psk=<key>` query parameter matches.
-pub async fn run_server(state: SharedState, port: u16, psk: String, tls: TlsAcceptor, chat_tx: ChatBroadcast) {
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+pub async fn run_server(state: SharedState, bind: String, port: u16, psk: String, tls: TlsAcceptor, chat_tx: ChatBroadcast) {
+    let addr: SocketAddr = format!("{bind}:{port}")
+        .parse()
+        .expect("invalid bind address");
     let listener = TcpListener::bind(addr)
         .await
         .expect("failed to bind WebSocket server");
@@ -68,12 +70,13 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
     let mut auth_ok = false;
 
     let result = accept_hdr_async(stream, |req: &Request, resp: Response| {
+        let expected = format!("psk={}", psk);
         let valid = req
             .uri()
             .query()
             .unwrap_or("")
             .split('&')
-            .any(|part| part == format!("psk={}", psk).as_str());
+            .any(|part| part.eq_ignore_ascii_case(&expected));
 
         if valid {
             auth_ok = true;

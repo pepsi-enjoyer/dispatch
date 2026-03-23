@@ -158,11 +158,15 @@ class SettingsActivity : AppCompatActivity() {
 
         settings.consoleHost = etHost.text.toString().trim().ifEmpty { "192.168.1.1" }
         settings.consolePort = etPort.text.toString().trim().toIntOrNull() ?: 9800
-        settings.psk = etPsk.text.toString().trim()
+        settings.psk = etPsk.text.toString().trim().lowercase()
         settings.speechLocale = etLocale.text.toString().trim().ifEmpty { "en-US" }
         settings.hapticEnabled = cbHaptic.isChecked
         settings.keepScreenOn = cbScreenOn.isChecked
         settings.continuousListening = cbContinuous.isChecked
+
+        // Clear stale cert fingerprint from a previous QR scan so it doesn't
+        // block TLS when connecting to a different console or a regenerated cert.
+        settings.certFingerprint = null
 
         setResult(RESULT_OK)
         finish()
