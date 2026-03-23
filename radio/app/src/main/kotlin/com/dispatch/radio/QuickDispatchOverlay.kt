@@ -13,7 +13,7 @@ import android.content.Context
 class QuickDispatchOverlay(private val context: Context) {
 
     private val tools = listOf(
-        "claude-code" to "Claude Code",
+        "claude" to "Claude",
         "copilot" to "GitHub Copilot"
     )
 

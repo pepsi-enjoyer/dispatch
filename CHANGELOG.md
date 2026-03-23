@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 
 - GitHub Copilot CLI support as an alternative AI agent alongside Claude Code. The orchestrator can dispatch agents with `"tool": "copilot"` to use Copilot instead of Claude. Copilot agents launch in YOLO mode (`--yolo` flag) for fully autonomous operation without permission prompts.
-- The `dispatch` action now accepts an optional `tool` parameter (`"claude-code"` or `"copilot"`) to select which AI agent to use per dispatch. Defaults to the configured default tool.
+- The `dispatch` action now accepts an optional `tool` parameter (`"claude"` or `"copilot"`) to select which AI agent to use per dispatch. Defaults to the configured default tool.
 
 ### Changed
 

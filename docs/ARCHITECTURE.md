@@ -199,7 +199,8 @@ user_callsign = "Dispatch"
 console_name = "Console"
 
 [tools]
-claude-code = "claude"
+ai-agent = "claude"
+claude = "claude"
 ```
 
 Callsigns are dynamically assigned from the pool -- each new agent gets the next unused name. The pool size determines max agents and page count (4 per page).
