@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.4.1
+
+### Added
+
+- Console channels: save and load console configuration profiles via `dispatch channel save/load/list/delete/show`. Each channel is a snapshot of the full `config.toml`, stored in the config directory under `channels/`. Switch between different configurations (ports, PSKs, agent names, identity) for different machines or contexts.
+
 ## v0.4.0
 
 ### Added
