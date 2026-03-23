@@ -93,12 +93,49 @@ class PushToTalkManager(
         putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 50L)
     }
 
-    /** Combine accumulated transcript with the current segment. */
+    /**
+     * Combine accumulated transcript with the current segment, stripping any
+     * overlap caused by the recognizer re-processing audio across restarts.
+     *
+     * When Android's SpeechRecognizer auto-completes and restarts, the new
+     * session often re-recognizes the tail end of the previous session's audio.
+     * This produces a current segment whose first N words duplicate the last N
+     * words of the accumulated transcript.  We detect the longest such overlap
+     * (minimum [MIN_OVERLAP_WORDS] to avoid false positives on coincidental
+     * matches) and append only the non-overlapping remainder.
+     */
     private fun combinedTranscript(current: String?): String {
         val cur = current?.trim() ?: ""
-        return if (accumulatedTranscript.isBlank()) cur
-        else if (cur.isBlank()) accumulatedTranscript
-        else "$accumulatedTranscript $cur"
+        if (accumulatedTranscript.isBlank()) return cur
+        if (cur.isBlank()) return accumulatedTranscript
+
+        val accWords = accumulatedTranscript.split(WS_REGEX)
+        val curWords = cur.split(WS_REGEX)
+
+        // Find the longest suffix of accWords that matches a prefix of curWords.
+        val maxOverlap = minOf(accWords.size, curWords.size)
+        var overlapLen = 0
+        for (len in maxOverlap downTo MIN_OVERLAP_WORDS) {
+            var match = true
+            for (i in 0 until len) {
+                if (!accWords[accWords.size - len + i].equals(curWords[i], ignoreCase = true)) {
+                    match = false
+                    break
+                }
+            }
+            if (match) {
+                overlapLen = len
+                break
+            }
+        }
+
+        return if (overlapLen > 0) {
+            val remainder = curWords.drop(overlapLen).joinToString(" ")
+            if (remainder.isBlank()) accumulatedTranscript
+            else "$accumulatedTranscript $remainder"
+        } else {
+            "$accumulatedTranscript $cur"
+        }
     }
 
     /** Deliver the final combined transcript if not already delivered. */
@@ -188,5 +225,14 @@ class PushToTalkManager(
     companion object {
         /** Grace period for the safety-net delivery after stopListening(). */
         private const val STOP_SAFETY_DELAY_MS = 500L
+
+        /**
+         * Minimum number of consecutive words that must match for overlap
+         * stripping to engage.  Keeps us from false-positiving on short
+         * coincidental matches (e.g. the user genuinely saying "yes yes").
+         */
+        private const val MIN_OVERLAP_WORDS = 2
+
+        private val WS_REGEX = "\\s+".toRegex()
     }
 }
