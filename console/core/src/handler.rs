@@ -58,7 +58,7 @@ pub struct ConsoleState {
     pub user_callsign: String,
     /// Display name for the console/orchestrator (default: "Console").
     pub console_name: String,
-    /// Default tool key for dispatching agents (e.g. "claude-code" or "copilot").
+    /// Default tool key for dispatching agents (e.g. "claude" or "copilot").
     pub default_tool: String,
 }
 
@@ -74,7 +74,7 @@ impl ConsoleState {
             event_tx: None,
             user_callsign: "Dispatch".to_string(),
             console_name: "Console".to_string(),
-            default_tool: "claude-code".to_string(),
+            default_tool: "claude".to_string(),
         }
     }
 
@@ -458,7 +458,7 @@ mod tests {
         let state = make_state();
 
         let mut msg = raw("dispatch");
-        msg.tool = Some("claude-code".to_string());
+        msg.tool = Some("claude".to_string());
         let resp = handle_message(msg, &state).unwrap();
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"type\":\"dispatched\""));
@@ -477,7 +477,7 @@ mod tests {
 
         // Dispatch first
         let mut d = raw("dispatch");
-        d.tool = Some("claude-code".to_string());
+        d.tool = Some("claude".to_string());
         handle_message(d, &state);
 
         // Set target to slot 1
@@ -501,7 +501,7 @@ mod tests {
         let state = make_state();
 
         let mut d = raw("dispatch");
-        d.tool = Some("claude-code".to_string());
+        d.tool = Some("claude".to_string());
         handle_message(d, &state);
 
         let mut st = raw("set_target");
@@ -522,7 +522,7 @@ mod tests {
         let state = make_state();
 
         let mut d = raw("dispatch");
-        d.tool = Some("claude-code".to_string());
+        d.tool = Some("claude".to_string());
         handle_message(d, &state);
 
         let mut r = raw("rename");
@@ -595,7 +595,7 @@ mod tests {
 
         // Dispatch an agent first
         let mut d = raw("dispatch");
-        d.tool = Some("claude-code".to_string());
+        d.tool = Some("claude".to_string());
         handle_message(d, &state);
 
         // Send image to Alpha
@@ -700,7 +700,7 @@ mod tests {
 
         // Dispatch first agent — gets Alpha (first in pool).
         let mut d1 = raw("dispatch");
-        d1.tool = Some("claude-code".to_string());
+        d1.tool = Some("claude".to_string());
         let resp1 = handle_message(d1, &state).unwrap();
         let json1 = serde_json::to_string(&resp1).unwrap();
         assert!(json1.contains("\"slot\":1"));
@@ -708,7 +708,7 @@ mod tests {
 
         // Dispatch second — gets Bravo (next in pool).
         let mut d2 = raw("dispatch");
-        d2.tool = Some("claude-code".to_string());
+        d2.tool = Some("claude".to_string());
         let resp2 = handle_message(d2, &state).unwrap();
         let json2 = serde_json::to_string(&resp2).unwrap();
         assert!(json2.contains("\"slot\":2"));
@@ -722,7 +722,7 @@ mod tests {
         // Dispatch again — goes to slot 1 (first empty) but gets Alpha
         // again (first unused callsign in pool after Bravo takes slot 2).
         let mut d3 = raw("dispatch");
-        d3.tool = Some("claude-code".to_string());
+        d3.tool = Some("claude".to_string());
         let resp3 = handle_message(d3, &state).unwrap();
         let json3 = serde_json::to_string(&resp3).unwrap();
         assert!(json3.contains("\"slot\":1"));
@@ -735,7 +735,7 @@ mod tests {
 
         // Dispatch into slot 3 explicitly, gets Alpha from pool.
         let mut d1 = raw("dispatch");
-        d1.tool = Some("claude-code".to_string());
+        d1.tool = Some("claude".to_string());
         d1.slot = Some(3);
         let resp = handle_message(d1, &state).unwrap();
         let json = serde_json::to_string(&resp).unwrap();
@@ -744,7 +744,7 @@ mod tests {
 
         // Next dispatch goes to slot 1 (first empty) with Bravo (next in pool).
         let mut d2 = raw("dispatch");
-        d2.tool = Some("claude-code".to_string());
+        d2.tool = Some("claude".to_string());
         let resp2 = handle_message(d2, &state).unwrap();
         let json2 = serde_json::to_string(&resp2).unwrap();
         assert!(json2.contains("\"slot\":1"));

@@ -106,8 +106,8 @@ pub fn dispatch_slot(
     cmd.env("DISPATCH_MSG_FILE", &msg_file);
 
     // Tool-specific flags for autonomous agent operation.
-    if tool_key == "claude-code" {
-        // Claude Code: system prompt injection and permission bypass.
+    if tool_key == "claude" {
+        // Claude: system prompt injection and permission bypass.
         let agents_md_path = format!("{}/docs/AGENTS.md", repo_root);
         if let Ok(mut instructions) = std::fs::read_to_string(&agents_md_path) {
             let memory = read_memory_file(repo_root);

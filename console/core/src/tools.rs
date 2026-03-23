@@ -30,7 +30,7 @@ pub enum ToolCall {
         /// Optional NATO callsign (e.g. "Delta") to dispatch a specific agent.
         #[serde(default)]
         callsign: Option<String>,
-        /// Optional tool key (e.g. "claude-code" or "copilot"). Falls back to
+        /// Optional tool key (e.g. "claude" or "copilot"). Falls back to
         /// the configured default tool if not specified.
         #[serde(default)]
         tool: Option<String>,
@@ -145,7 +145,7 @@ pub fn tool_definitions() -> serde_json::Value {
                     },
                     "tool": {
                         "type": "string",
-                        "description": "Optional tool to use: \"claude-code\" (default) or \"copilot\". When omitted, uses the configured default tool."
+                        "description": "Optional tool to use: \"claude\" (default) or \"copilot\". When omitted, uses the configured default tool."
                     }
                 },
                 "required": ["repo", "prompt"]

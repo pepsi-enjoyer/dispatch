@@ -186,7 +186,7 @@ The console parses the `"action"` field to determine which tool to execute. Para
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
-| `dispatch` | `repo`, `prompt`, `callsign` (optional), `tool` (optional) | Dispatch an agent with a prompt. The agent creates its own worktree. Returns slot and callsign. The `tool` parameter selects which AI agent to use: `"claude-code"` (default) or `"copilot"`. |
+| `dispatch` | `repo`, `prompt`, `callsign` (optional), `tool` (optional) | Dispatch an agent with a prompt. The agent creates its own worktree. Returns slot and callsign. The `tool` parameter selects which AI agent to use: `"claude"` (default) or `"copilot"`. |
 | `terminate` | `agent` | Kill an agent by callsign or slot number. Frees the slot. |
 | `merge` | `task_id` | Acknowledge that an agent has merged its branch. |
 | `list_agents` | _(none)_ | List all active agent slots with callsign, tool, working/idle status, and repo. |
@@ -284,8 +284,8 @@ The console generates a random PSK on first run and stores it in `~/.config/disp
 <- {
      "type": "agents",
      "slots": [
-       { "slot": 1, "callsign": "Alpha", "tool": "claude-code", "status": "busy" },
-       { "slot": 2, "callsign": "Bravo", "tool": "claude-code", "status": "idle" },
+       { "slot": 1, "callsign": "Alpha", "tool": "claude", "status": "busy" },
+       { "slot": 2, "callsign": "Bravo", "tool": "claude", "status": "idle" },
        { "slot": 3, "callsign": "Charlie", "tool": "copilot", "status": "idle" },
        { "slot": 4, "callsign": null, "tool": null, "status": "empty" }
      ],
@@ -330,8 +330,8 @@ Sent to the current target.
 **Dispatch new agent**
 
 ```
--> { "type": "dispatch", "tool": "claude-code", "slot": 3 }
-<- { "type": "dispatched", "slot": 3, "callsign": "Charlie", "tool": "claude-code" }
+-> { "type": "dispatch", "tool": "claude", "slot": 3 }
+<- { "type": "dispatched", "slot": 3, "callsign": "Charlie", "tool": "claude" }
 ```
 
 **Terminate agent**
@@ -703,11 +703,12 @@ scrollback_lines = 1000
 callsigns = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey", "X-ray", "Yankee", "Zulu"]
 
 [tools]
-claude-code = "claude"
+ai-agent = "claude"
+claude = "claude"
 copilot = "copilot"
 ```
 
-The console automatically adds tool-specific flags when spawning agents: `--dangerously-skip-permissions` and `--system-prompt` for Claude Code, `--yolo` for Copilot (auto-accepts all permissions for autonomous operation).
+The console automatically adds tool-specific flags when spawning agents: `--dangerously-skip-permissions` and `--system-prompt` for Claude, `--yolo` for Copilot (auto-accepts all permissions for autonomous operation).
 
 ### CLI
 

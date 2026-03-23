@@ -30,7 +30,7 @@ pub struct RawInbound {
     pub text: Option<String>,
     /// Used by: send — auto-dispatch to idle/new agent.
     pub auto: Option<bool>,
-    /// Used by: dispatch — tool to launch (e.g. "claude-code").
+    /// Used by: dispatch — tool to launch (e.g. "claude").
     pub tool: Option<String>,
     /// Used by: rename — new callsign for the agent.
     pub callsign: Option<String>,
