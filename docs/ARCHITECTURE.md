@@ -199,7 +199,7 @@ user_callsign = "Dispatch"
 console_name = "Console"
 
 [tools]
-ai-agent = "claude"
+ai_agent = "claude"
 claude = "claude"
 ```
 
