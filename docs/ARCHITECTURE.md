@@ -228,7 +228,6 @@ radio/app/src/main/
 │   ├── VolumeKeyAccessibilityService.kt  # Background volume key capture
 │   ├── VolumeUpHandler.kt           # Agent status overlay trigger
 │   ├── AgentStatusOverlay.kt        # Agent list dialog
-│   ├── QuickDispatchOverlay.kt      # Tool picker (prepared)
 │   ├── ConsoleDiscovery.kt          # mDNS NSD service browser
 │   ├── RadioSettings.kt             # SharedPreferences wrapper
 │   ├── HapticFeedback.kt            # Vibration patterns
@@ -304,7 +303,6 @@ All messages are JSON with a `type` field discriminator.
 | `send` | `text`, `auto` | Voice transcript (auto=true) or typed text |
 | `list_agents` | -- | Request current slot states |
 | `set_target` | `slot` | Change targeted agent |
-| `dispatch` | `tool` | Request new agent (via quick dispatch) |
 | `terminate` | `callsign` | Kill agent |
 | `interrupt` | -- | Interrupt the orchestrator |
 | `send_image` | `callsign`, `data`, `filename` | Base64 image to agent |

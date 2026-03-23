@@ -828,7 +828,7 @@ When the activity is in the foreground, volume key events are handled by `MainAc
 - `MainActivity` sets `isActivityInForeground = true` in `onResume`, `false` in `onPause`.
 - When the service receives a volume key event and the activity is NOT in the foreground, it invokes the bridge callback, which calls the activity's existing `onKeyDown` / `onKeyUp`.
 - When the activity IS in the foreground, the service returns `false` to let normal dispatch handle it.
-- Volume Up overlays (status overlay and Quick Dispatch) are suppressed when backgrounded since a dialog cannot be shown without a foreground activity.
+- Volume Up overlays (status overlay) are suppressed when backgrounded since a dialog cannot be shown without a foreground activity.
 
 **Setup:** The user must enable the service in Android Settings > Accessibility. The settings screen provides a shortcut button and shows the current status (ENABLED / DISABLED).
 
