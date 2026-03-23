@@ -84,9 +84,10 @@ pub fn build_system_prompt(
 // ── Spawn ────────────────────────────────────────────────────────────────────
 
 /// Spawn the orchestrator process. Returns an error string if the spawn fails.
-/// `claude_cmd` is the configured command for Claude (from the [tools] config).
-pub fn spawn(system_prompt: &str, cwd: &str, claude_cmd: &str) -> Result<Orchestrator, String> {
-    let mut cmd = Command::new(claude_cmd);
+/// `tool_cmd` is the configured command for the AI agent (from `[tools]` config,
+/// keyed by the `ai-agent` setting).
+pub fn spawn(system_prompt: &str, cwd: &str, tool_cmd: &str) -> Result<Orchestrator, String> {
+    let mut cmd = Command::new(tool_cmd);
     cmd.args([
         "-p",
         "--output-format", "stream-json",
@@ -100,7 +101,7 @@ pub fn spawn(system_prompt: &str, cwd: &str, claude_cmd: &str) -> Result<Orchest
     cmd.stderr(Stdio::null());
 
     let mut child = cmd.spawn().map_err(|e| {
-        format!("failed to spawn {}: {e} -- is it installed and on PATH?", claude_cmd)
+        format!("failed to spawn {}: {e} -- is it installed and on PATH?", tool_cmd)
     })?;
     let stdin = child.stdin.take()
         .ok_or_else(|| "failed to open orchestrator stdin".to_string())?;

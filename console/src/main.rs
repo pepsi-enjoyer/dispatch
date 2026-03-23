@@ -237,7 +237,7 @@ fn main() -> io::Result<()> {
     let orch_user_callsign = cfg.identity.user_callsign.clone();
     let orch_console_name = cfg.identity.console_name.clone();
     let orch_default_tool = cfg.default_tool_key().to_string();
-    let orch_claude_cmd = cfg.tools.get("claude").cloned().unwrap_or_else(|| "claude".to_string());
+    let orch_cmd = cfg.tools.get(&orch_default_tool).cloned().unwrap_or_else(|| orch_default_tool.clone());
     let (orch_ready_tx, orch_ready_rx) = mpsc::channel::<Result<orchestrator::Orchestrator, String>>();
     {
         let tx = orch_ready_tx.clone();
@@ -247,7 +247,7 @@ fn main() -> io::Result<()> {
         let uc = orch_user_callsign.clone();
         let cn = orch_console_name.clone();
         let dt = orch_default_tool.clone();
-        let cc = orch_claude_cmd.clone();
+        let cc = orch_cmd.clone();
         thread::spawn(move || {
             let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
             let tool_defs = tools::tool_definitions();
@@ -481,7 +481,7 @@ fn main() -> io::Result<()> {
                     let uc = orch_user_callsign.clone();
                     let cn = orch_console_name.clone();
                     let dt = orch_default_tool.clone();
-                    let cc = orch_claude_cmd.clone();
+                    let cc = orch_cmd.clone();
                     thread::spawn(move || {
                         let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
                         let tool_defs = tools::tool_definitions();
@@ -871,7 +871,7 @@ fn main() -> io::Result<()> {
                                             let uc = orch_user_callsign.clone();
                                             let cn = orch_console_name.clone();
                                             let dt = orch_default_tool.clone();
-                                            let cc = orch_claude_cmd.clone();
+                                            let cc = orch_cmd.clone();
                                             thread::spawn(move || {
                                                 let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
                                                 let tool_defs = tools::tool_definitions();
