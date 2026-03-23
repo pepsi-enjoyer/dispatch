@@ -57,6 +57,7 @@ impl App {
             orch_log: std::collections::VecDeque::new(),
             orch_scroll: 0,
             orchestrator: None,
+            orch_error: None,
             pending_voice: Vec::new(),
             chat_tx,
             status_blink_frame: 0,

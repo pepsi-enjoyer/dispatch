@@ -48,6 +48,10 @@ pub async fn run_server(state: SharedState, port: u16, psk: String, tls: TlsAcce
             let tls_stream = match tls.accept(stream).await {
                 Ok(s) => s,
                 Err(_) => {
+                    let st = state.lock().unwrap();
+                    if let Some(tx) = &st.event_tx {
+                        let _ = tx.send(WsEvent::TlsFailure { addr: peer_addr.to_string() });
+                    }
                     return;
                 }
             };
@@ -104,6 +108,14 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
         }
     };
 
+    // Notify TUI that a radio client has connected.
+    {
+        let st = state.lock().unwrap();
+        if let Some(ev_tx) = &st.event_tx {
+            let _ = ev_tx.send(WsEvent::RadioConnected { addr: peer_addr.to_string() });
+        }
+    }
+
     let (mut tx, mut rx) = ws_stream.split();
 
     loop {
@@ -145,6 +157,14 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                     Err(_) => break,
                 }
             }
+        }
+    }
+
+    // Notify TUI that the radio client has disconnected.
+    {
+        let st = state.lock().unwrap();
+        if let Some(ev_tx) = &st.event_tx {
+            let _ = ev_tx.send(WsEvent::RadioDisconnected { addr: peer_addr.to_string() });
         }
     }
 

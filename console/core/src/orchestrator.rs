@@ -82,8 +82,8 @@ pub fn build_system_prompt(
 
 // ── Spawn ────────────────────────────────────────────────────────────────────
 
-/// Spawn the orchestrator process. Returns None if the spawn fails.
-pub fn spawn(system_prompt: &str, cwd: &str) -> Option<Orchestrator> {
+/// Spawn the orchestrator process. Returns an error string if the spawn fails.
+pub fn spawn(system_prompt: &str, cwd: &str) -> Result<Orchestrator, String> {
     let mut cmd = Command::new("claude");
     cmd.args([
         "-p",
@@ -97,9 +97,13 @@ pub fn spawn(system_prompt: &str, cwd: &str) -> Option<Orchestrator> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
 
-    let mut child = cmd.spawn().ok()?;
-    let stdin = child.stdin.take()?;
-    let stdout = child.stdout.take()?;
+    let mut child = cmd.spawn().map_err(|e| {
+        format!("failed to spawn claude: {e} -- is it installed and on PATH?")
+    })?;
+    let stdin = child.stdin.take()
+        .ok_or_else(|| "failed to open orchestrator stdin".to_string())?;
+    let stdout = child.stdout.take()
+        .ok_or_else(|| "failed to open orchestrator stdout".to_string())?;
 
     let (tx, rx) = mpsc::channel();
     let (sid_tx, sid_rx) = mpsc::channel();
@@ -170,7 +174,7 @@ pub fn spawn(system_prompt: &str, cwd: &str) -> Option<Orchestrator> {
     let session_id = sid_rx.recv_timeout(std::time::Duration::from_secs(10))
         .unwrap_or_else(|_| "default".to_string());
 
-    Some(Orchestrator {
+    Ok(Orchestrator {
         child,
         stdin,
         rx,
