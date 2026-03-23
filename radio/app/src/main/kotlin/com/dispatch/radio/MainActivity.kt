@@ -38,7 +38,7 @@ import java.io.File
  * Single-activity entry point for Dispatch Radio (dispatch-88k.1).
  *
  * Volume Down -> push-to-talk via SpeechRecognizer (dispatch-88k.2)
- * Volume Up   -> agent status / quick dispatch (dispatch-88k.4)
+ * Volume Up   -> agent status overlay (dispatch-88k.4)
  *
  * Integrates: WebSocket client (dispatch-88k.5), UI (dispatch-88k.6),
  *             settings (dispatch-88k.7), haptics (dispatch-88k.8).
