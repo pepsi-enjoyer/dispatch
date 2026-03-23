@@ -84,17 +84,19 @@ pub fn build_system_prompt(
 // ── Spawn ────────────────────────────────────────────────────────────────────
 
 /// Spawn the orchestrator process. Returns an error string if the spawn fails.
-/// `tool_cmd` is the configured command for the AI agent (from `[tools]` config,
-/// keyed by the `ai-agent` setting).
-pub fn spawn(system_prompt: &str, cwd: &str, tool_cmd: &str) -> Result<Orchestrator, String> {
+/// `tool_key` is the configured AI agent name (e.g. "claude" or "copilot").
+/// `tool_cmd` is the resolved command to execute (from `[tools]` config).
+pub fn spawn(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str) -> Result<Orchestrator, String> {
     let mut cmd = Command::new(tool_cmd);
     cmd.args([
         "-p",
         "--output-format", "stream-json",
         "--input-format", "stream-json",
-        "--verbose",
-        "--system-prompt", system_prompt,
     ]);
+    if tool_key == "claude" {
+        cmd.arg("--verbose");
+    }
+    cmd.args(["--system-prompt", system_prompt]);
     cmd.current_dir(cwd);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());

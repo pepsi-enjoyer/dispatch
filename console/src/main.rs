@@ -252,7 +252,7 @@ fn main() -> io::Result<()> {
             let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
             let tool_defs = tools::tool_definitions();
             let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt);
-            let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &cc));
+            let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc));
         });
     }
     app.push_ticker("ORCHESTRATOR: starting...".to_string());
@@ -486,7 +486,7 @@ fn main() -> io::Result<()> {
                         let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
                         let tool_defs = tools::tool_definitions();
                         let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt);
-                        let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &cc));
+                        let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc));
                     });
                 }
             }
@@ -876,7 +876,7 @@ fn main() -> io::Result<()> {
                                                 let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
                                                 let tool_defs = tools::tool_definitions();
                                                 let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt);
-                                                let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &cc));
+                                                let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc));
                                             });
                                         }
                                     }

@@ -186,7 +186,7 @@ The console parses the `"action"` field to determine which tool to execute. Para
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
-| `dispatch` | `repo`, `prompt`, `callsign` (optional), `tool` (optional) | Dispatch an agent with a prompt. The agent creates its own worktree. Returns slot and callsign. Omit `tool` to use the configured AI agent from `[tools] ai-agent`. Only specify `tool` (`"claude"` or `"copilot"`) to override for a specific dispatch. |
+| `dispatch` | `repo`, `prompt`, `callsign` (optional), `tool` (optional) | Dispatch an agent with a prompt. The agent creates its own worktree. Returns slot and callsign. Omit `tool` to use the configured AI agent from `[tools] ai_agent`. Only specify `tool` (`"claude"` or `"copilot"`) to override for a specific dispatch. |
 | `terminate` | `agent` | Kill an agent by callsign or slot number. Frees the slot. |
 | `merge` | `task_id` | Acknowledge that an agent has merged its branch. |
 | `list_agents` | _(none)_ | List all active agent slots with callsign, tool, working/idle status, and repo. |
@@ -703,7 +703,7 @@ scrollback_lines = 1000
 callsigns = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey", "X-ray", "Yankee", "Zulu"]
 
 [tools]
-ai-agent = "claude"
+ai_agent = "claude"
 claude = "claude"
 copilot = "copilot"
 ```

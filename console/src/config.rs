@@ -72,7 +72,7 @@ impl Config {
     /// Falls back to "claude" if not set.
     pub fn default_tool_key(&self) -> &str {
         self.tools
-            .get("ai-agent")
+            .get("ai_agent")
             .map(|s| s.as_str())
             .unwrap_or("claude")
     }
@@ -101,7 +101,7 @@ impl Default for Config {
     fn default() -> Self {
         let psk = generate_psk();
         let mut tools = HashMap::new();
-        tools.insert("ai-agent".to_string(), "claude".to_string());
+        tools.insert("ai_agent".to_string(), "claude".to_string());
         tools.insert("claude".to_string(), "claude".to_string());
         tools.insert("copilot".to_string(), "copilot".to_string());
 
@@ -349,7 +349,7 @@ fn to_toml_with_comments(cfg: &Config) -> String {
     // Default tool selection first.
     let default_tool = cfg.default_tool_key();
     tools_lines.push_str(&format!("# Which tool to use by default when dispatching agents: \"claude\" or \"copilot\".\n"));
-    tools_lines.push_str(&format!("ai-agent = \"{default_tool}\"\n"));
+    tools_lines.push_str(&format!("ai_agent = \"{default_tool}\"\n"));
     // Ensure canonical ordering for tool commands.
     for key in ["claude", "copilot"] {
         if let Some(val) = cfg.tools.get(key) {
@@ -357,7 +357,7 @@ fn to_toml_with_comments(cfg: &Config) -> String {
         }
     }
     for (k, v) in &cfg.tools {
-        if k != "claude" && k != "copilot" && k != "ai-agent" {
+        if k != "claude" && k != "copilot" && k != "ai_agent" {
             tools_lines.push_str(&format!("{k} = \"{v}\"\n"));
         }
     }
