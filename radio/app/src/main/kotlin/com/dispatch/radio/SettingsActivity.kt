@@ -80,6 +80,10 @@ class SettingsActivity : AppCompatActivity() {
                     etHost.setText(console.host)
                     etPort.setText(console.port.toString())
                 }
+                // Auto-populate TLS cert fingerprint from mDNS TXT record.
+                if (console.certFingerprint != null) {
+                    settings.certFingerprint = console.certFingerprint
+                }
                 tvDiscoverStatus.text = "FOUND: ${console.name} (${console.host}:${console.port})"
                 btnDiscover.isEnabled = true
             }

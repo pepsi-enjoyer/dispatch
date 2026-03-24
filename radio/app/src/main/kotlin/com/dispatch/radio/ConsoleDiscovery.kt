@@ -14,7 +14,7 @@ import android.os.Looper
  */
 class ConsoleDiscovery(context: Context) {
 
-    data class Console(val host: String, val port: Int, val name: String)
+    data class Console(val host: String, val port: Int, val name: String, val certFingerprint: String? = null)
 
     interface Listener {
         fun onConsoleFound(console: Console)
@@ -55,7 +55,8 @@ class ConsoleDiscovery(context: Context) {
                 override fun onServiceResolved(si: NsdServiceInfo) {
                     @Suppress("DEPRECATION")
                     val host = si.host?.hostAddress ?: return
-                    val console = Console(host, si.port, si.serviceName)
+                    val fp = si.attributes?.get("fp")?.let { String(it, Charsets.UTF_8) }
+                    val console = Console(host, si.port, si.serviceName, fp)
                     mainHandler.post { listener?.onConsoleFound(console) }
                 }
             })
