@@ -220,7 +220,7 @@ fn pane_info_strip(global_idx: usize, local_idx: usize, app: &App) -> Text<'stat
                 Span::styled(" ", Style::default()),
                 Span::styled(activity_label, activity_style),
                 Span::styled(
-                    format!("  @{} {}", agent.dispatch_wall_str, runtime),
+                    format!("  {} @{} {}", agent.repo_name, agent.dispatch_wall_str, runtime),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]);

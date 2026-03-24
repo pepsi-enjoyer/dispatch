@@ -94,16 +94,28 @@ class AgentStatusOverlay(private val context: Context) {
                 }
                 row.addView(dot)
 
-                // Callsign in its unique color
-                row.addView(TextView(context).apply {
+                // Callsign + repo in a vertical stack
+                val nameCol = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+                    )
+                }
+                nameCol.addView(TextView(context).apply {
                     text = agent.callsign.uppercase()
                     setTextColor(callsignColor(agent.callsign))
                     textSize = 16f
                     typeface = font
-                    layoutParams = LinearLayout.LayoutParams(
-                        0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-                    )
                 })
+                if (!agent.repo.isNullOrEmpty()) {
+                    nameCol.addView(TextView(context).apply {
+                        text = agent.repo
+                        setTextColor(0xFF666666.toInt())
+                        textSize = 11f
+                        typeface = font
+                    })
+                }
+                row.addView(nameCol)
 
                 // Status label
                 row.addView(TextView(context).apply {

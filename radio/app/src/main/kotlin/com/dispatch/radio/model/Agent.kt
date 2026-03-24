@@ -5,7 +5,8 @@ data class Agent(
     val callsign: String,
     val tool: String,
     val status: String, // "working", "idle", "empty"
-    val task: String?
+    val task: String?,
+    val repo: String?
 )
 
 val NATO_CALLSIGNS = listOf(
