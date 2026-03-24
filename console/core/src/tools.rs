@@ -11,6 +11,7 @@
 //   list_agents()                     — get all agent slot states
 //   list_repos()                      — list known repositories
 //   message_agent(agent, text)        — send text to an agent's PTY
+//   strike_team(spec_file, name?, repo) — launch a strike team from a spec
 
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +56,16 @@ pub enum ToolCall {
         agent: String,
         /// Text to send to the agent's PTY.
         text: String,
+    },
+    /// Launch a Strike Team from a spec file.
+    StrikeTeam {
+        /// Path to the spec/feature markdown file, relative to repo root.
+        spec_file: String,
+        /// Short name for this operation. Defaults to spec filename without extension.
+        #[serde(default)]
+        name: Option<String>,
+        /// Repository name or path.
+        repo: String,
     },
 }
 
@@ -112,6 +123,12 @@ pub enum ToolResult {
     MessageSent {
         agent: String,
         slot: u32,
+    },
+    /// Strike team launched.
+    StrikeTeamAcknowledged {
+        name: String,
+        spec_file: String,
+        repo: String,
     },
     /// Tool call failed.
     Error {
@@ -211,6 +228,28 @@ pub fn tool_definitions() -> serde_json::Value {
                     }
                 },
                 "required": ["agent", "text"]
+            }
+        },
+        {
+            "name": "strike_team",
+            "description": "Launch a Strike Team: break a spec into tasks with dependencies, then dispatch agents in parallel waves until all tasks are complete.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "spec_file": {
+                        "type": "string",
+                        "description": "Path to the spec/feature markdown file, relative to repo root."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Short name for this operation. Defaults to spec filename without extension."
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Repository name or path."
+                    }
+                },
+                "required": ["spec_file", "repo"]
             }
         }
     ])
@@ -369,6 +408,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_strike_team_call() {
+        let text = r#"<tool_call>{"name": "strike_team", "input": {"spec_file": "docs/auth-spec.md", "repo": "myrepo"}}</tool_call>"#;
+        let call = parse_tool_call(text).unwrap();
+        match call {
+            ToolCall::StrikeTeam { spec_file, name, repo } => {
+                assert_eq!(spec_file, "docs/auth-spec.md");
+                assert!(name.is_none());
+                assert_eq!(repo, "myrepo");
+            }
+            _ => panic!("expected StrikeTeam"),
+        }
+    }
+
+    #[test]
+    fn parse_strike_team_call_with_name() {
+        let text = r#"<tool_call>{"name": "strike_team", "input": {"spec_file": "docs/auth-spec.md", "name": "auth", "repo": "myrepo"}}</tool_call>"#;
+        let call = parse_tool_call(text).unwrap();
+        match call {
+            ToolCall::StrikeTeam { spec_file, name, repo } => {
+                assert_eq!(spec_file, "docs/auth-spec.md");
+                assert_eq!(name.as_deref(), Some("auth"));
+                assert_eq!(repo, "myrepo");
+            }
+            _ => panic!("expected StrikeTeam"),
+        }
+    }
+
+    #[test]
     fn parse_bare_json() {
         let text = r#"I'll dispatch an agent now. {"name": "dispatch", "input": {"repo": "myrepo", "prompt": "test"}}"#;
         let call = parse_tool_call(text).unwrap();
@@ -421,7 +488,8 @@ mod tests {
         assert!(names.contains(&"list_agents"));
         assert!(names.contains(&"list_repos"));
         assert!(names.contains(&"message_agent"));
-        assert_eq!(names.len(), 6);
+        assert!(names.contains(&"strike_team"));
+        assert_eq!(names.len(), 7);
     }
 
     #[test]
