@@ -40,6 +40,7 @@ Keep messages to one sentence. Do not include file paths or code.
    cd .dispatch/.worktrees/{callsign}
    ```
 3. Do the work. Commit with clear messages. Run `git status` to ensure nothing is unstaged or untracked.
+<!-- WORKFLOW_STEP_4 -->
 4. Merge your branch into main, clean up, and push:
    ```bash
    cd "$(git rev-parse --path-format=absolute --git-common-dir)/.."
@@ -48,6 +49,7 @@ Keep messages to one sentence. Do not include file paths or code.
    git branch -d dispatch/{callsign}
    git push
    ```
+<!-- WORKFLOW_STEP_4_END -->
 5. **Send a final status message.** This is mandatory -- never skip it.
    - For code tasks: report what you changed, committed, and pushed.
    - For research/investigation tasks: send your findings or answer. This is the ONLY way your results reach Console and Dispatch. If you investigated something and don't send a message with what you found, your work is lost.

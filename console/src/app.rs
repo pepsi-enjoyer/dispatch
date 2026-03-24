@@ -3,6 +3,7 @@
 use std::{
     io::Write,
     sync::Arc,
+    thread,
     time::Instant,
 };
 
@@ -372,10 +373,15 @@ impl App {
                     // Existing idle agent: write the prompt to the PTY so it
                     // receives the new task (the agent process is still alive).
                     let slot = self.slots[slot_idx].as_mut().unwrap();
-                    if slot.tool == "copilot" {
-                        // Type char-by-char then Enter to avoid paste-mode.
+                    if let Some(ref sw) = slot.shared_writer {
+                        // Copilot: type char-by-char on a background thread
+                        // to avoid blocking the main TUI loop.
+                        let w = Arc::clone(sw);
                         let ts = Arc::clone(&slot.last_output_at);
-                        crate::pty::type_to_copilot_writer(&mut slot.writer, &full_prompt, &ts);
+                        let prompt = full_prompt.clone();
+                        thread::spawn(move || {
+                            crate::pty::type_to_copilot(&w, &prompt, &ts);
+                        });
                     } else {
                         let msg = format!("{}\r", full_prompt);
                         let _ = slot.writer.write_all(msg.as_bytes());
@@ -525,9 +531,15 @@ impl App {
 
                 let slot = self.slots[idx].as_mut().unwrap();
                 let agent_name = slot.display_name().to_string();
-                if slot.tool == "copilot" {
+                if let Some(ref sw) = slot.shared_writer {
+                    // Copilot: type char-by-char on a background thread
+                    // to avoid blocking the main TUI loop.
+                    let w = Arc::clone(sw);
                     let ts = Arc::clone(&slot.last_output_at);
-                    crate::pty::type_to_copilot_writer(&mut slot.writer, &text, &ts);
+                    let text = text.clone();
+                    thread::spawn(move || {
+                        crate::pty::type_to_copilot(&w, &text, &ts);
+                    });
                 } else {
                     let msg = format!("{}\r", text);
                     let _ = slot.writer.write_all(msg.as_bytes());
