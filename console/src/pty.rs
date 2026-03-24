@@ -14,6 +14,19 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use crate::types::SlotState;
 
+/// Thin wrapper so an `Arc<Mutex<Box<dyn Write + Send>>>` can itself
+/// satisfy `Write + Send` and be stored in `SlotState::writer`.
+struct SharedWriter(Arc<Mutex<Box<dyn std::io::Write + Send>>>);
+
+impl std::io::Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap().flush()
+    }
+}
+
 /// Ensure `.dispatch/MEMORY.md` exists in the repo root with a starter template.
 /// Called before spawning an agent so shared memory is always available.
 fn ensure_memory_file(repo_root: &str) {
@@ -105,6 +118,11 @@ pub fn dispatch_slot(
     // instead of echoing to the terminal. This eliminates terminal noise issues.
     cmd.env("DISPATCH_MSG_FILE", &msg_file);
 
+    // Force Copilot into app mode, bypassing its loader which tries to
+    // re-exec with --no-warnings and crashes (GitHub CLI bug #1399).
+    cmd.env("COPILOT_RUN_APP", "1");
+    cmd.env_remove("COPILOT_LOADER_PID");
+
     // Tool-specific flags for autonomous agent operation.
     if tool_key == "claude" {
         // Claude: system prompt injection and permission bypass.
@@ -124,16 +142,26 @@ pub fn dispatch_slot(
     } else if tool_key == "copilot" {
         // GitHub Copilot CLI: YOLO mode auto-accepts all tool/path/URL
         // permissions so the agent works autonomously without prompts.
-        // Copilot natively reads AGENTS.md and .github/copilot-instructions.md
-        // from the repo, so no --system-prompt needed.
         cmd.arg("--yolo");
+
+        // Copilot reads AGENTS.md from the repo root (not docs/).
+        // Ensure it exists by symlinking from docs/AGENTS.md if needed.
+        let root_agents = format!("{}/AGENTS.md", repo_root);
+        let docs_agents = format!("{}/docs/AGENTS.md", repo_root);
+        if !std::path::Path::new(&root_agents).exists() && std::path::Path::new(&docs_agents).exists() {
+            #[cfg(unix)]
+            { let _ = std::os::unix::fs::symlink(&docs_agents, &root_agents); }
+            #[cfg(windows)]
+            { let _ = std::fs::copy(&docs_agents, &root_agents); }
+        }
     }
     if let Some(prompt) = initial_prompt {
-        // Copilot requires -p flag for the prompt; Claude accepts it as a bare arg.
-        if tool_key == "copilot" {
-            cmd.arg("-p");
+        // Claude accepts the prompt as a bare positional arg and stays interactive.
+        // Copilot with -p runs non-interactively and exits after processing, so
+        // we skip -p here and write the prompt into the PTY stdin after spawn.
+        if tool_key != "copilot" {
+            cmd.arg(prompt);
         }
-        cmd.arg(prompt);
     }
     cmd.cwd(cwd.unwrap_or(repo_root));
 
@@ -179,6 +207,40 @@ pub fn dispatch_slot(
     });
 
     let writer = pair.master.take_writer().ok()?;
+
+    // For Copilot: write the prompt into the interactive session after spawn.
+    // Copilot with -p exits after processing; we need it to stay alive.
+    // Wrap writer in Arc<Mutex> so a delayed-prompt thread can share it.
+    // Use \r (not \n) to submit since that's what the PTY expects.
+    let shared: Arc<Mutex<Box<dyn std::io::Write + Send>>> = Arc::new(Mutex::new(writer));
+
+    if tool_key == "copilot" {
+        if let Some(prompt) = initial_prompt {
+            let prompt = prompt.to_string();
+            let last_output_for_delay = Arc::clone(&last_output_at);
+            let w = Arc::clone(&shared);
+            thread::spawn(move || {
+                // Wait for copilot to produce its first output (prompt ready),
+                // or time out after 10 seconds.
+                let start = Instant::now();
+                loop {
+                    thread::sleep(std::time::Duration::from_millis(500));
+                    let last = *last_output_for_delay.lock().unwrap();
+                    if last > start || start.elapsed() > std::time::Duration::from_secs(10) {
+                        thread::sleep(std::time::Duration::from_millis(1000));
+                        break;
+                    }
+                }
+                let msg = format!("{}\n", prompt);
+                let mut guard = w.lock().unwrap();
+                let _ = guard.write_all(msg.as_bytes());
+                let _ = guard.flush();
+            });
+        }
+    }
+
+    // Wrap shared writer as Box<dyn Write + Send> for SlotState.
+    let writer: Box<dyn std::io::Write + Send> = Box::new(SharedWriter(shared));
     let callsign = callsign.to_string();
     let wall = Local::now().format("%H:%M").to_string();
 

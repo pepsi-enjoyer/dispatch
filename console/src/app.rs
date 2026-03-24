@@ -368,7 +368,8 @@ impl App {
                     // Existing idle agent: write the prompt to the PTY so it
                     // receives the new task (the agent process is still alive).
                     let slot = self.slots[slot_idx].as_mut().unwrap();
-                    let msg = format!("{}\r", full_prompt);
+                    let eol = if slot.tool == "copilot" { "\n" } else { "\r" };
+                    let msg = format!("{}{}", full_prompt, eol);
                     let _ = slot.writer.write_all(msg.as_bytes());
                     let _ = slot.writer.flush();
                 }
@@ -515,7 +516,8 @@ impl App {
 
                 let slot = self.slots[idx].as_mut().unwrap();
                 let agent_name = slot.display_name().to_string();
-                let msg = format!("{}\r", text);
+                let eol = if slot.tool == "copilot" { "\n" } else { "\r" };
+                let msg = format!("{}{}", text, eol);
                 let _ = slot.writer.write_all(msg.as_bytes());
                 let _ = slot.writer.flush();
                 *slot.last_output_at.lock().unwrap() = Instant::now();

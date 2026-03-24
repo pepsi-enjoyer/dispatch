@@ -307,6 +307,11 @@ fn spawn_acp(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str) -> 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
 
+    // Force Copilot into app mode, bypassing its loader which tries to
+    // re-exec with --no-warnings and crashes (GitHub CLI bug #1399).
+    cmd.env("COPILOT_RUN_APP", "1");
+    cmd.env_remove("COPILOT_LOADER_PID");
+
     let mut child = cmd.spawn().map_err(|e| {
         format!("failed to spawn {}: {e} -- is it installed and on PATH?", tool_cmd)
     })?;
