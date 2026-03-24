@@ -23,22 +23,22 @@ spec: docs/auth-spec.md
 
 ## T1: Implement user model
 status: pending
-depends: none
+dependencies: none
 prompt: Create a User struct in src/models/user.rs with fields id, email, name, created_at. Add serde derives.
 
 ## T2: Add user API endpoints
 status: pending
-depends: T1
+dependencies: T1
 prompt: Create REST endpoints for CRUD operations on users in src/routes/users.rs.
 
 ## T3: Add authentication middleware
 status: pending
-depends: T1
+dependencies: T1
 prompt: Implement JWT authentication middleware in src/middleware/auth.rs.
 
 ## T4: Wire auth into endpoints
 status: pending
-depends: T2, T3
+dependencies: T2, T3
 prompt: Apply auth middleware to user endpoints. Add integration tests.
 ```
 
@@ -47,7 +47,7 @@ prompt: Apply auth middleware to user endpoints. Add integration tests.
 | Field | Values | Description |
 |-------|--------|-------------|
 | `status` | `pending`, `active`, `done`, `failed` | Current state |
-| `depends` | `none` or comma-separated IDs (`T1, T3`) | Dependency list |
+| `dependencies` | `none` or comma-separated IDs (`T1, T3`) | Dependency list |
 | `prompt` | Single line of text | Self-contained agent instruction |
 | `agent` | Callsign (e.g., `Alpha`) | Written by console when assigned |
 
@@ -139,12 +139,12 @@ spec: {spec_file}
 
 ## T1: <short title>
 status: pending
-depends: none
+dependencies: none
 prompt: <detailed prompt for an AI agent — include file paths, function names, acceptance criteria>
 
 ## T2: <short title>
 status: pending
-depends: T1
+dependencies: T1
 prompt: <detailed prompt>
 
 RULES:
@@ -177,7 +177,7 @@ Minimal additions:
 Pure logic — no PTY, TUI, or async dependencies. Contains:
 
 - `TaskStatus` enum (`Pending`, `Active`, `Done`, `Failed`)
-- `Task` struct (id, title, status, depends, prompt, agent)
+- `Task` struct (id, title, status, dependencies, prompt, agent)
 - `StrikeTeamPhase` enum (`Planning`, `Executing`, `Complete`, `Aborted`)
 - `StrikeTeamState` struct (name, spec_file, repo, phase, tasks, task_file_path)
 - Parser: `parse_task_file(contents) -> Vec<Task>`
