@@ -217,6 +217,7 @@ fn main() -> io::Result<()> {
         pane_cols,
         cfg.tools.clone(),
         cfg.default_tool_key().to_string(),
+        cfg.merge_strategy().to_string(),
         workspace,
         cfg.terminal.scrollback_lines,
         chat_tx,
@@ -238,6 +239,7 @@ fn main() -> io::Result<()> {
     let orch_user_callsign = cfg.identity.user_callsign.clone();
     let orch_console_name = cfg.identity.console_name.clone();
     let orch_default_tool = cfg.default_tool_key().to_string();
+    let orch_merge_strategy = cfg.merge_strategy().to_string();
     let orch_cmd = cfg.tools.get(&orch_default_tool).cloned().unwrap_or_else(|| orch_default_tool.clone());
     let (orch_ready_tx, orch_ready_rx) = mpsc::channel::<Result<orchestrator::Orchestrator, String>>();
     {
@@ -248,11 +250,12 @@ fn main() -> io::Result<()> {
         let uc = orch_user_callsign.clone();
         let cn = orch_console_name.clone();
         let dt = orch_default_tool.clone();
+        let ms = orch_merge_strategy.clone();
         let cc = orch_cmd.clone();
         thread::spawn(move || {
             let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
             let tool_defs = tools::tool_definitions();
-            let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt);
+            let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt, &ms);
             let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc));
         });
     }
@@ -482,11 +485,12 @@ fn main() -> io::Result<()> {
                     let uc = orch_user_callsign.clone();
                     let cn = orch_console_name.clone();
                     let dt = orch_default_tool.clone();
+                    let ms = orch_merge_strategy.clone();
                     let cc = orch_cmd.clone();
                     thread::spawn(move || {
                         let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
                         let tool_defs = tools::tool_definitions();
-                        let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt);
+                        let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt, &ms);
                         let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc));
                     });
                 }
@@ -729,6 +733,7 @@ fn main() -> io::Result<()> {
                                                     util::repo_name_from_path(&selected_repo), &selected_repo,
                                                     None,
                                                     &cs,
+                                                    &app.merge_strategy,
                                                 ) {
                                                     let page = g / SLOTS_PER_PAGE;
                                                     let local = g % SLOTS_PER_PAGE;
@@ -827,6 +832,7 @@ fn main() -> io::Result<()> {
                                             util::repo_name_from_path(&repo), &repo,
                                             None,
                                             &cs,
+                                            &app.merge_strategy,
                                         ) {
                                             let name = slot.display_name().to_string();
                                             app.push_orch(OrchestratorEventKind::Dispatched { agent: name.clone(), slot: target_g + 1, tool: tool_key.clone() });
@@ -874,11 +880,12 @@ fn main() -> io::Result<()> {
                                             let uc = orch_user_callsign.clone();
                                             let cn = orch_console_name.clone();
                                             let dt = orch_default_tool.clone();
+                                            let ms = orch_merge_strategy.clone();
                                             let cc = orch_cmd.clone();
                                             thread::spawn(move || {
                                                 let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
                                                 let tool_defs = tools::tool_definitions();
-                                                let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt);
+                                                let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt, &ms);
                                                 let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc));
                                             });
                                         }

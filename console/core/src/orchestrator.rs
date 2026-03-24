@@ -78,6 +78,7 @@ pub fn build_system_prompt(
     user_callsign: &str,
     console_name: &str,
     default_tool: &str,
+    merge_strategy: &str,
 ) -> String {
     let repo_name = repos.first()
         .and_then(|p| std::path::Path::new(p).file_name())
@@ -94,10 +95,16 @@ pub fn build_system_prompt(
             console_name, user_callsign
         ));
 
+    let strategy_label = if merge_strategy == "merge" {
+        "merge (agents merge their branch into main and push)"
+    } else {
+        "pr (agents push their branch and create a pull request, never merge to main)"
+    };
+
     let callsign_list = callsigns.join(", ");
     format!(
-        "Repository: {}\n\nThe user's callsign is: {}\nYour name (the orchestrator) is: {}\n\nAvailable agent callsigns ({} slots): {}\nCallsigns are dynamically assigned to the next available slot.\n\nConfigured AI agent: {}\nAll dispatched agents use this tool. Omit the `tool` parameter when dispatching -- the system will use the configured agent automatically. Only specify `tool` if Dispatch explicitly requests a different one.\n\n{}",
-        repo_name, user_callsign, console_name, callsigns.len(), callsign_list, default_tool, md_content
+        "Repository: {}\n\nThe user's callsign is: {}\nYour name (the orchestrator) is: {}\n\nAvailable agent callsigns ({} slots): {}\nCallsigns are dynamically assigned to the next available slot.\n\nConfigured AI agent: {}\nAll dispatched agents use this tool. Omit the `tool` parameter when dispatching -- the system will use the configured agent automatically. Only specify `tool` if Dispatch explicitly requests a different one.\n\nMerge strategy: {}\n\n{}",
+        repo_name, user_callsign, console_name, callsigns.len(), callsign_list, default_tool, strategy_label, md_content
     )
 }
 
@@ -666,7 +673,7 @@ mod tests {
         let repos = vec!["/home/user/myrepo"];
         let tools = tools::tool_definitions();
         let callsigns = vec!["Alpha".to_string(), "Bravo".to_string()];
-        let prompt = build_system_prompt(&repos, &tools, &callsigns, "Dispatch", "Console", "claude");
+        let prompt = build_system_prompt(&repos, &tools, &callsigns, "Dispatch", "Console", "claude", "pr");
         // Should always contain repo name as context prefix.
         assert!(prompt.contains("Repository: myrepo"));
         // Should list configured callsigns.
@@ -676,6 +683,8 @@ mod tests {
         assert!(prompt.contains("Console"));
         // Should include configured AI agent.
         assert!(prompt.contains("Configured AI agent: claude"));
+        // Should include merge strategy.
+        assert!(prompt.contains("Merge strategy: pr"));
     }
 
     #[test]
@@ -683,7 +692,8 @@ mod tests {
         let repos = vec!["/home/user/myrepo"];
         let tools = tools::tool_definitions();
         let callsigns = vec!["Alpha".to_string()];
-        let prompt = build_system_prompt(&repos, &tools, &callsigns, "Dispatch", "Console", "copilot");
+        let prompt = build_system_prompt(&repos, &tools, &callsigns, "Dispatch", "Console", "copilot", "merge");
         assert!(prompt.contains("Configured AI agent: copilot"));
+        assert!(prompt.contains("Merge strategy: merge"));
     }
 }

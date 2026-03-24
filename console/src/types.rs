@@ -152,6 +152,8 @@ pub struct App {
     pub tools: std::collections::HashMap<String, String>,
     /// Which tool key to use by default when dispatching agents (e.g. "claude" or "copilot").
     pub default_tool: String,
+    /// How agents finalize work: "pr" (create pull request) or "merge" (merge to main).
+    pub merge_strategy: String,
     // Ticker: LED-style scrolling marquee (independent items)
     pub ticker_items: Vec<TickerItem>,
     pub ticker_pending: std::collections::VecDeque<String>,

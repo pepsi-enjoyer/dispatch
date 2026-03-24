@@ -20,6 +20,12 @@ user_callsign = "Dispatch"
 # Display name for the console/orchestrator.
 console_name = "Console"
 
+[workflow]
+# How agents finalize their work:
+#   "pr"    - push branch and create a pull request (default, never merges to main)
+#   "merge" - merge branch into main and push
+merge_strategy = "pr"
+
 [tools]
 # Which tool to use by default when dispatching agents: "claude" or "copilot".
 ai_agent = "claude"

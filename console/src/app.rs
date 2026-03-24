@@ -23,6 +23,7 @@ impl App {
         pane_cols: u16,
         tools: std::collections::HashMap<String, String>,
         default_tool: String,
+        merge_strategy: String,
         workspace: Workspace,
         scrollback_lines: u32,
         chat_tx: tokio::sync::broadcast::Sender<String>,
@@ -49,6 +50,7 @@ impl App {
             pane_cols,
             tools,
             default_tool,
+            merge_strategy,
             ticker_items: Vec::new(),
             ticker_pending: std::collections::VecDeque::new(),
             ticker_frame_counter: 0,
@@ -359,6 +361,7 @@ impl App {
                         repo_name_from_path(&target_repo), &target_repo,
                         Some(&full_prompt),
                         &callsign_for_prompt,
+                        &self.merge_strategy,
                     ) {
                         Some(slot) => { self.slots[slot_idx] = Some(slot); }
                         None => return tools::ToolResult::Error {

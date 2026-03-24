@@ -56,6 +56,66 @@ fn read_memory_file(repo_root: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
+// Workflow step 4 for "merge" strategy (merge to main and push).
+const WORKFLOW_MERGE: &str = "\
+4. Merge your branch into main, clean up, and push:
+   ```bash
+   cd \"$(git rev-parse --path-format=absolute --git-common-dir)/..\"
+   git merge dispatch/{callsign} --no-ff -m \"Merge dispatch/{callsign}\"
+   git worktree remove .dispatch/.worktrees/{callsign} --force
+   git branch -d dispatch/{callsign}
+   git push
+   ```";
+
+// Workflow step 4 for "pr" strategy (push branch + create PR, never merge).
+const WORKFLOW_PR: &str = "\
+4. Push your branch and create a pull request. **Do NOT merge into main.**
+   ```bash
+   cd \"$(git rev-parse --path-format=absolute --git-common-dir)/..\"
+   git push -u origin dispatch/{callsign}
+   gh pr create --base main --head dispatch/{callsign} --title \"dispatch/{callsign}: <short summary>\" --fill
+   git worktree remove .dispatch/.worktrees/{callsign} --force
+   ```";
+
+/// Build agent instructions by reading `docs/AGENTS.md` and swapping the
+/// workflow finalization step based on `merge_strategy`.  Also appends
+/// shared memory if any prior agents have written to it.
+///
+/// Returns the full instruction text ready for injection as a system prompt
+/// (Claude) or written to `.dispatch/instructions/AGENTS.md` (Copilot).
+fn build_agent_instructions(repo_root: &str, merge_strategy: &str) -> Option<String> {
+    let agents_md_path = format!("{}/docs/AGENTS.md", repo_root);
+    let mut instructions = std::fs::read_to_string(&agents_md_path).ok()?;
+
+    // Replace the merge/PR workflow block.  The block starts with
+    // "4. Merge your branch" or "4. Push your branch" and ends just
+    // before "5. **Send a final".  We match on the stable prefix of
+    // step 4 that exists in the checked-in AGENTS.md.
+    let step4_start = "4. Merge your branch into main, clean up, and push:";
+    let step5_start = "5. **Send a final status message.**";
+    if let (Some(s4), Some(s5)) = (instructions.find(step4_start), instructions.find(step5_start)) {
+        let workflow = if merge_strategy == "merge" { WORKFLOW_MERGE } else { WORKFLOW_PR };
+        let mut patched = String::with_capacity(instructions.len());
+        patched.push_str(&instructions[..s4]);
+        patched.push_str(workflow);
+        patched.push('\n');
+        patched.push_str("   ");
+        patched.push_str(&instructions[s5..]);
+        instructions = patched;
+    }
+
+    // Append shared memory from prior agents.
+    let memory = read_memory_file(repo_root);
+    let memory = memory.trim();
+    if !memory.is_empty() {
+        instructions.push_str("\n\n---\n\n## Shared Memory (from prior agents)\n\n");
+        instructions.push_str(memory);
+        instructions.push('\n');
+    }
+
+    Some(instructions)
+}
+
 /// Ensure `.dispatch/messages/` directory exists in the repo root.
 fn ensure_messages_dir(repo_root: &str) {
     let dir = format!("{}/.dispatch/messages", repo_root);
@@ -138,6 +198,7 @@ pub fn dispatch_slot(
     repo_root: &str,
     initial_prompt: Option<&str>,
     callsign: &str,
+    merge_strategy: &str,
 ) -> Option<SlotState> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -174,20 +235,15 @@ pub fn dispatch_slot(
     cmd.env("COPILOT_RUN_APP", "1");
     cmd.env_remove("COPILOT_LOADER_PID");
 
+    // Build agent instructions with the configured merge strategy.
+    let instructions = build_agent_instructions(repo_root, merge_strategy);
+
     // Tool-specific flags for autonomous agent operation.
     if tool_key == "claude" {
         // Claude: system prompt injection and permission bypass.
-        let agents_md_path = format!("{}/docs/AGENTS.md", repo_root);
-        if let Ok(mut instructions) = std::fs::read_to_string(&agents_md_path) {
-            let memory = read_memory_file(repo_root);
-            let memory = memory.trim();
-            if !memory.is_empty() {
-                instructions.push_str("\n\n---\n\n## Shared Memory (from prior agents)\n\n");
-                instructions.push_str(memory);
-                instructions.push('\n');
-            }
+        if let Some(ref instr) = instructions {
             cmd.arg("--system-prompt");
-            cmd.arg(&instructions);
+            cmd.arg(instr);
         }
         cmd.arg("--dangerously-skip-permissions");
     } else if tool_key == "copilot" {
@@ -197,15 +253,14 @@ pub fn dispatch_slot(
         cmd.arg("--yolo");
         cmd.arg("--no-ask-user");
 
-        // Copilot reads AGENTS.md from the repo root (not docs/).
-        // Ensure it exists by symlinking from docs/AGENTS.md if needed.
-        let root_agents = format!("{}/AGENTS.md", repo_root);
-        let docs_agents = format!("{}/docs/AGENTS.md", repo_root);
-        if !std::path::Path::new(&root_agents).exists() && std::path::Path::new(&docs_agents).exists() {
-            #[cfg(unix)]
-            { let _ = std::os::unix::fs::symlink(&docs_agents, &root_agents); }
-            #[cfg(windows)]
-            { let _ = std::fs::copy(&docs_agents, &root_agents); }
+        // Write modified instructions to .dispatch/instructions/ so copilot
+        // picks them up via --add-dir. This applies the merge_strategy config.
+        if let Some(ref instr) = instructions {
+            let instr_dir = format!("{}/.dispatch/instructions", repo_root);
+            let _ = std::fs::create_dir_all(&instr_dir);
+            let _ = std::fs::write(format!("{}/AGENTS.md", instr_dir), instr);
+            cmd.arg("--add-dir");
+            cmd.arg(&instr_dir);
         }
     }
     if let Some(prompt) = initial_prompt {
