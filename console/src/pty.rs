@@ -65,9 +65,16 @@ fn ensure_messages_dir(repo_root: &str) {
 /// Type text into copilot's interactive PTY one character at a time, then
 /// press Enter (`\r`). Writing in bulk causes copilot's TUI to enter paste
 /// mode where `\r` is treated as a literal newline instead of submitting.
-/// By sending each character individually with a small delay we simulate
-/// real keyboard typing and keep copilot in single-char input mode.
-pub fn type_to_copilot(w: &Arc<Mutex<Box<dyn std::io::Write + Send>>>, text: &str) {
+///
+/// After all characters are written, polls `output_ts` (the PTY reader's
+/// last-output timestamp) until it has been stable for `SETTLE_MS`. This
+/// guarantees copilot has finished rendering the typed text before Enter
+/// is sent, avoiding partial-prompt submission.
+pub fn type_to_copilot(
+    w: &Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    text: &str,
+    output_ts: &Arc<Mutex<Instant>>,
+) {
     use std::io::Write;
     for ch in text.chars() {
         let mut buf = [0u8; 4];
@@ -76,10 +83,9 @@ pub fn type_to_copilot(w: &Arc<Mutex<Box<dyn std::io::Write + Send>>>, text: &st
         let _ = guard.write_all(bytes.as_bytes());
         let _ = guard.flush();
         drop(guard);
-        thread::sleep(std::time::Duration::from_millis(2));
+        thread::sleep(std::time::Duration::from_millis(5));
     }
-    // Brief pause then send Enter to submit.
-    thread::sleep(std::time::Duration::from_millis(50));
+    wait_for_output_settle(output_ts);
     let mut guard = w.lock().unwrap();
     let _ = guard.write_all(b"\r");
     let _ = guard.flush();
@@ -93,6 +99,28 @@ pub fn prepare_msg_file(repo_root: &str, callsign: &str) -> String {
     // Remove stale file from a previous agent with the same callsign.
     let _ = std::fs::remove_file(&path);
     path
+}
+
+/// Spin until the PTY reader timestamp has not changed for SETTLE_MS,
+/// meaning copilot has finished processing and rendering input.
+/// Gives up after TIMEOUT_MS to avoid hanging forever.
+fn wait_for_output_settle(output_ts: &Arc<Mutex<Instant>>) {
+    const SETTLE_MS: u128 = 150;
+    const TIMEOUT_MS: u128 = 5_000;
+    let wall_start = Instant::now();
+    let mut prev = *output_ts.lock().unwrap();
+    loop {
+        thread::sleep(std::time::Duration::from_millis(25));
+        let now_ts = *output_ts.lock().unwrap();
+        if now_ts != prev {
+            prev = now_ts;
+        } else if now_ts.elapsed().as_millis() >= SETTLE_MS {
+            break;
+        }
+        if wall_start.elapsed().as_millis() >= TIMEOUT_MS {
+            break;
+        }
+    }
 }
 
 /// Open a PTY and spawn a process. Returns a SlotState on success.
@@ -260,7 +288,7 @@ pub fn dispatch_slot(
                 // keyboard input. Bulk writes cause copilot's TUI to treat input
                 // as a paste event where \r becomes a literal newline instead of
                 // the submit action.
-                type_to_copilot(&w, &prompt);
+                type_to_copilot(&w, &prompt, &last_output_for_delay);
             });
         }
     }
@@ -361,17 +389,20 @@ pub fn poll_agent_messages(slots: &mut [Option<SlotState>]) -> Vec<(usize, Strin
 
 /// Same as `type_to_copilot` but operates on a bare `Write` trait object.
 /// Used from `app.rs` where we have `&mut Box<dyn Write + Send>` directly.
-pub fn type_to_copilot_writer(w: &mut Box<dyn std::io::Write + Send>, text: &str) {
+pub fn type_to_copilot_writer(
+    w: &mut Box<dyn std::io::Write + Send>,
+    text: &str,
+    output_ts: &Arc<Mutex<Instant>>,
+) {
     use std::io::Write;
     for ch in text.chars() {
         let mut buf = [0u8; 4];
         let bytes = ch.encode_utf8(&mut buf);
         let _ = w.write_all(bytes.as_bytes());
         let _ = w.flush();
-        thread::sleep(std::time::Duration::from_millis(2));
+        thread::sleep(std::time::Duration::from_millis(5));
     }
-    // Brief pause then send Enter to submit.
-    thread::sleep(std::time::Duration::from_millis(50));
+    wait_for_output_settle(output_ts);
     let _ = w.write_all(b"\r");
     let _ = w.flush();
 }
