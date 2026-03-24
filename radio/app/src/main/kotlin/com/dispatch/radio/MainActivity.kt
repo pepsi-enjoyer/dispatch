@@ -384,7 +384,8 @@ class MainActivity : AppCompatActivity() {
                         callsign = obj.get("callsign")?.takeUnless { it.isJsonNull }?.asString ?: return@mapNotNull null,
                         tool = obj.get("tool")?.takeUnless { it.isJsonNull }?.asString ?: "",
                         status = status,
-                        task = obj.get("task")?.takeUnless { it.isJsonNull }?.asString
+                        task = obj.get("task")?.takeUnless { it.isJsonNull }?.asString,
+                        repo = obj.get("repo")?.takeUnless { it.isJsonNull }?.asString
                     )
                 }
                 currentSlot = json.get("target")?.takeUnless { it.isJsonNull }?.asInt ?: currentSlot
