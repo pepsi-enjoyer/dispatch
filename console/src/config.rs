@@ -48,6 +48,24 @@ fn default_console_name() -> String {
     "Console".to_string()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowConfig {
+    /// How agents finalize their work: "pr" (push branch + create PR, default)
+    /// or "merge" (merge to main + push).
+    #[serde(default = "default_merge_strategy")]
+    pub merge_strategy: String,
+}
+
+fn default_merge_strategy() -> String {
+    "pr".to_string()
+}
+
+fn default_workflow() -> WorkflowConfig {
+    WorkflowConfig {
+        merge_strategy: default_merge_strategy(),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -57,6 +75,8 @@ pub struct Config {
     pub agents: Option<AgentsConfig>,
     #[serde(default = "default_identity")]
     pub identity: IdentityConfig,
+    #[serde(default = "default_workflow")]
+    pub workflow: WorkflowConfig,
     pub tools: HashMap<String, String>,
 }
 
@@ -75,6 +95,11 @@ impl Config {
             .get("ai_agent")
             .map(|s| s.as_str())
             .unwrap_or("claude")
+    }
+
+    /// Returns the configured merge strategy: "pr" or "merge".
+    pub fn merge_strategy(&self) -> &str {
+        &self.workflow.merge_strategy
     }
 
     /// Effective callsign list. Uses [agents].callsigns if present,
@@ -119,6 +144,7 @@ impl Default for Config {
                 callsigns: default_callsigns(),
             }),
             identity: default_identity(),
+            workflow: default_workflow(),
             tools,
         }
     }
@@ -393,6 +419,10 @@ fn to_toml_with_comments(cfg: &Config) -> String {
          # Display name for the console/orchestrator.\n\
          console_name = \"{console_name}\"\n\
          \n\
+         [workflow]\n\
+         # How agents finalize work: \"pr\" (push branch + create PR, default) or \"merge\" (merge to main + push).\n\
+         merge_strategy = \"{merge_strategy}\"\n\
+         \n\
          [tools]\n\
          {tools}",
         port = cfg.server.port,
@@ -402,6 +432,7 @@ fn to_toml_with_comments(cfg: &Config) -> String {
         callsigns = callsigns_str,
         user_callsign = cfg.identity.user_callsign,
         console_name = cfg.identity.console_name,
+        merge_strategy = cfg.workflow.merge_strategy,
         tools = tools_lines,
     )
 }

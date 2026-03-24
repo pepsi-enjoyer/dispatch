@@ -117,6 +117,8 @@ pub struct SlotState {
     // Keep master alive for resize (dispatch-bgz.6)
     pub master: Box<dyn portable_pty::MasterPty>,
     pub last_output_at: Arc<Mutex<Instant>>,  // updated by PTY reader on output
+    /// Shared writer for copilot agents (background thread typing). None for claude.
+    pub shared_writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     pub idle: bool,                           // true when no output for idle threshold
     // Scrollback (dispatch-ct2.4): lines scrolled back from bottom
     pub scroll_offset: usize,
@@ -152,6 +154,8 @@ pub struct App {
     pub tools: std::collections::HashMap<String, String>,
     /// Which tool key to use by default when dispatching agents (e.g. "claude" or "copilot").
     pub default_tool: String,
+    /// How agents finalize work: "pr" (create pull request) or "merge" (merge to main).
+    pub merge_strategy: String,
     // Ticker: LED-style scrolling marquee (independent items)
     pub ticker_items: Vec<TickerItem>,
     pub ticker_pending: std::collections::VecDeque<String>,

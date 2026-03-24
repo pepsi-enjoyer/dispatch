@@ -1,7 +1,7 @@
 // PTY management: spawn, kill, terminate, resize (dispatch-bgz.2, dispatch-bgz.6).
 
 use std::{
-    io::Read,
+    io::{Read, Write},
     process::Command,
     sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
     thread,
@@ -13,6 +13,21 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use crate::types::SlotState;
+
+/// Thin wrapper so an `Arc<Mutex<Box<dyn Write + Send>>>` can itself
+/// satisfy `Write + Send` and be stored in `SlotState::writer`.
+/// Only used for copilot agents that need shared writer access from
+/// background threads. Claude agents use the writer directly.
+struct SharedWriter(Arc<Mutex<Box<dyn Write + Send>>>);
+
+impl Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap().flush()
+    }
+}
 
 /// Ensure `.dispatch/MEMORY.md` exists in the repo root with a starter template.
 /// Called before spawning an agent so shared memory is always available.
@@ -43,10 +58,102 @@ fn read_memory_file(repo_root: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
+// Workflow step 4 for "merge" strategy (merge to main and push).
+const WORKFLOW_MERGE: &str = "\
+4. Merge your branch into main, clean up, and push:
+   ```bash
+   cd \"$(git rev-parse --path-format=absolute --git-common-dir)/..\"
+   git merge dispatch/{callsign} --no-ff -m \"Merge dispatch/{callsign}\"
+   git worktree remove .dispatch/.worktrees/{callsign} --force
+   git branch -d dispatch/{callsign}
+   git push
+   ```";
+
+// Workflow step 4 for "pr" strategy (push branch + create PR, never merge).
+const WORKFLOW_PR: &str = "\
+4. Push your branch and create a pull request. **Do NOT merge into main.**
+   ```bash
+   cd \"$(git rev-parse --path-format=absolute --git-common-dir)/..\"
+   git push -u origin dispatch/{callsign}
+   gh pr create --base main --head dispatch/{callsign} --title \"dispatch/{callsign}: <short summary>\" --fill
+   git worktree remove .dispatch/.worktrees/{callsign} --force
+   ```";
+
+/// Build agent instructions by reading `docs/AGENTS.md` and swapping the
+/// workflow finalization step based on `merge_strategy`.  Also appends
+/// shared memory if any prior agents have written to it.
+///
+/// Returns the full instruction text ready for injection as a system prompt
+/// (Claude) or written to `.dispatch/instructions/AGENTS.md` (Copilot).
+fn build_agent_instructions(repo_root: &str, merge_strategy: &str) -> Option<String> {
+    let agents_md_path = format!("{}/docs/AGENTS.md", repo_root);
+    let mut instructions = std::fs::read_to_string(&agents_md_path).ok()?;
+
+    // Replace the merge/PR workflow block between markers.
+    // Uses HTML comment markers in AGENTS.md for robust matching.
+    let marker_start = "<!-- WORKFLOW_STEP_4 -->";
+    let marker_end = "<!-- WORKFLOW_STEP_4_END -->";
+    if let (Some(s4), Some(s5_marker)) = (instructions.find(marker_start), instructions.find(marker_end)) {
+        let after_marker = s5_marker + marker_end.len();
+        let workflow = if merge_strategy == "merge" { WORKFLOW_MERGE } else { WORKFLOW_PR };
+        let mut patched = String::with_capacity(instructions.len());
+        patched.push_str(&instructions[..s4]);
+        patched.push_str(workflow);
+        patched.push_str(&instructions[after_marker..]);
+        instructions = patched;
+    } else {
+        eprintln!("warning: AGENTS.md missing workflow markers, merge_strategy not applied");
+    }
+
+    // Append shared memory from prior agents.
+    let memory = read_memory_file(repo_root);
+    let memory = memory.trim();
+    if !memory.is_empty() {
+        instructions.push_str("\n\n---\n\n## Shared Memory (from prior agents)\n\n");
+        instructions.push_str(memory);
+        instructions.push('\n');
+    }
+
+    Some(instructions)
+}
+
 /// Ensure `.dispatch/messages/` directory exists in the repo root.
 fn ensure_messages_dir(repo_root: &str) {
     let dir = format!("{}/.dispatch/messages", repo_root);
     let _ = std::fs::create_dir_all(&dir);
+}
+
+/// Inner implementation: type text char-by-char into a writer, wait for
+/// output to settle, then press Enter. Caller must provide exclusive
+/// access to the writer (either by holding a lock or owning &mut).
+fn type_to_copilot_inner(w: &mut dyn Write, text: &str, output_ts: &Arc<Mutex<Instant>>) {
+    for ch in text.chars() {
+        let mut buf = [0u8; 4];
+        let bytes = ch.encode_utf8(&mut buf);
+        let _ = w.write_all(bytes.as_bytes());
+        let _ = w.flush();
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    wait_for_output_settle(output_ts);
+    let _ = w.write_all(b"\r");
+    let _ = w.flush();
+}
+
+/// Type text into copilot's interactive PTY one character at a time, then
+/// press Enter (`\r`). Writing in bulk causes copilot's TUI to enter paste
+/// mode where `\r` is treated as a literal newline instead of submitting.
+///
+/// After all characters are written, polls `output_ts` (the PTY reader's
+/// last-output timestamp) until it has been stable for `SETTLE_MS`. This
+/// guarantees copilot has finished rendering the typed text before Enter
+/// is sent, avoiding partial-prompt submission.
+pub fn type_to_copilot(
+    w: &Arc<Mutex<Box<dyn Write + Send>>>,
+    text: &str,
+    output_ts: &Arc<Mutex<Instant>>,
+) {
+    let mut guard = w.lock().unwrap();
+    type_to_copilot_inner(&mut **guard, text, output_ts);
 }
 
 /// Prepare the agent's message file: delete any stale file and return the path.
@@ -57,6 +164,28 @@ pub fn prepare_msg_file(repo_root: &str, callsign: &str) -> String {
     // Remove stale file from a previous agent with the same callsign.
     let _ = std::fs::remove_file(&path);
     path
+}
+
+/// Spin until the PTY reader timestamp has not changed for SETTLE_MS,
+/// meaning copilot has finished processing and rendering input.
+/// Gives up after TIMEOUT_MS to avoid hanging forever.
+fn wait_for_output_settle(output_ts: &Arc<Mutex<Instant>>) {
+    const SETTLE_MS: u128 = 150;
+    const TIMEOUT_MS: u128 = 5_000;
+    let wall_start = Instant::now();
+    let mut prev = *output_ts.lock().unwrap();
+    loop {
+        thread::sleep(std::time::Duration::from_millis(25));
+        let now_ts = *output_ts.lock().unwrap();
+        if now_ts != prev {
+            prev = now_ts;
+        } else if now_ts.elapsed().as_millis() >= SETTLE_MS {
+            break;
+        }
+        if wall_start.elapsed().as_millis() >= TIMEOUT_MS {
+            break;
+        }
+    }
 }
 
 /// Open a PTY and spawn a process. Returns a SlotState on success.
@@ -74,6 +203,7 @@ pub fn dispatch_slot(
     repo_root: &str,
     initial_prompt: Option<&str>,
     callsign: &str,
+    merge_strategy: &str,
 ) -> Option<SlotState> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -105,35 +235,46 @@ pub fn dispatch_slot(
     // instead of echoing to the terminal. This eliminates terminal noise issues.
     cmd.env("DISPATCH_MSG_FILE", &msg_file);
 
+    // Build agent instructions with the configured merge strategy.
+    let instructions = build_agent_instructions(repo_root, merge_strategy);
+
     // Tool-specific flags for autonomous agent operation.
     if tool_key == "claude" {
         // Claude: system prompt injection and permission bypass.
-        let agents_md_path = format!("{}/docs/AGENTS.md", repo_root);
-        if let Ok(mut instructions) = std::fs::read_to_string(&agents_md_path) {
-            let memory = read_memory_file(repo_root);
-            let memory = memory.trim();
-            if !memory.is_empty() {
-                instructions.push_str("\n\n---\n\n## Shared Memory (from prior agents)\n\n");
-                instructions.push_str(memory);
-                instructions.push('\n');
-            }
+        if let Some(ref instr) = instructions {
             cmd.arg("--system-prompt");
-            cmd.arg(&instructions);
+            cmd.arg(instr);
         }
         cmd.arg("--dangerously-skip-permissions");
     } else if tool_key == "copilot" {
+        // Force Copilot into app mode, bypassing its loader which tries to
+        // re-exec with --no-warnings and crashes (GitHub CLI bug #1399).
+        cmd.env("COPILOT_RUN_APP", "1");
+        cmd.env_remove("COPILOT_LOADER_PID");
+
         // GitHub Copilot CLI: YOLO mode auto-accepts all tool/path/URL
         // permissions so the agent works autonomously without prompts.
-        // Copilot natively reads AGENTS.md and .github/copilot-instructions.md
-        // from the repo, so no --system-prompt needed.
+        // --no-ask-user prevents the agent from pausing to ask questions.
         cmd.arg("--yolo");
+        cmd.arg("--no-ask-user");
+
+        // Write modified instructions to .dispatch/instructions/ so copilot
+        // picks them up via --add-dir. This applies the merge_strategy config.
+        if let Some(ref instr) = instructions {
+            let instr_dir = format!("{}/.dispatch/instructions", repo_root);
+            let _ = std::fs::create_dir_all(&instr_dir);
+            let _ = std::fs::write(format!("{}/AGENTS.md", instr_dir), instr);
+            cmd.arg("--add-dir");
+            cmd.arg(&instr_dir);
+        }
     }
     if let Some(prompt) = initial_prompt {
-        // Copilot requires -p flag for the prompt; Claude accepts it as a bare arg.
-        if tool_key == "copilot" {
-            cmd.arg("-p");
+        // Claude accepts the prompt as a bare positional arg and stays interactive.
+        // Copilot with -p runs non-interactively and exits after processing, so
+        // we skip -p here and write the prompt into the PTY stdin after spawn.
+        if tool_key != "copilot" {
+            cmd.arg(prompt);
         }
-        cmd.arg(prompt);
     }
     cmd.cwd(cwd.unwrap_or(repo_root));
 
@@ -179,6 +320,46 @@ pub fn dispatch_slot(
     });
 
     let writer = pair.master.take_writer().ok()?;
+
+    // For copilot agents, wrap the writer in Arc<Mutex> so background threads
+    // can type char-by-char. For claude agents, use the writer directly to
+    // avoid unnecessary mutex overhead on every write.
+    let (writer, shared_writer): (Box<dyn Write + Send>, Option<Arc<Mutex<Box<dyn Write + Send>>>>) =
+        if tool_key == "copilot" {
+            let shared: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
+
+            // Write the initial prompt into the interactive session after spawn.
+            // Copilot with -p exits after processing; we need it to stay alive.
+            if let Some(prompt) = initial_prompt {
+                let prompt = prompt.to_string();
+                let last_output_for_delay = Arc::clone(&last_output_at);
+                let w = Arc::clone(&shared);
+                thread::spawn(move || {
+                    // Wait for copilot to produce its first output (prompt ready),
+                    // or time out after 10 seconds.
+                    let start = Instant::now();
+                    loop {
+                        thread::sleep(std::time::Duration::from_millis(500));
+                        let last = *last_output_for_delay.lock().unwrap();
+                        if last > start || start.elapsed() > std::time::Duration::from_secs(10) {
+                            thread::sleep(std::time::Duration::from_millis(1000));
+                            break;
+                        }
+                    }
+                    // Type each character individually to the PTY to simulate real
+                    // keyboard input. Bulk writes cause copilot's TUI to treat input
+                    // as a paste event where \r becomes a literal newline instead of
+                    // the submit action.
+                    type_to_copilot(&w, &prompt, &last_output_for_delay);
+                });
+            }
+
+            let boxed: Box<dyn Write + Send> = Box::new(SharedWriter(Arc::clone(&shared)));
+            (boxed, Some(shared))
+        } else {
+            (writer, None)
+        };
+
     let callsign = callsign.to_string();
     let wall = Local::now().format("%H:%M").to_string();
 
@@ -197,6 +378,7 @@ pub fn dispatch_slot(
         child_pid,
         master: pair.master,
         last_output_at,
+        shared_writer,
         idle: false,
         scroll_offset: 0,
         msg_file,

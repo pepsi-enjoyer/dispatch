@@ -77,6 +77,34 @@ pub fn strip_action_blocks(text: &str) -> String {
     result
 }
 
+/// Strip system context tags that leak from the LLM framework into
+/// orchestrator output. Removes `<reminder>`, `<current_datetime>`,
+/// `<system_notification>`, and `<sql_tables>` blocks.
+pub fn strip_system_tags(text: &str) -> String {
+    let mut result = text.to_string();
+    // Order matters: strip outer tags first so nested content is removed together.
+    let tags: &[(&str, &str)] = &[
+        ("<reminder>", "</reminder>"),
+        ("<current_datetime>", "</current_datetime>"),
+        ("<system_notification>", "</system_notification>"),
+        ("<sql_tables>", "</sql_tables>"),
+    ];
+    for &(open, close) in tags {
+        loop {
+            let Some(start) = result.find(open) else { break };
+            if let Some(end_offset) = result[start..].find(close) {
+                result.replace_range(start..start + end_offset + close.len(), "");
+            } else {
+                // No closing tag: remove from the opening tag to end of line.
+                let end = result[start..].find('\n').map_or(result.len(), |p| start + p);
+                result.replace_range(start..end, "");
+                break;
+            }
+        }
+    }
+    result
+}
+
 /// Remove lines that are internal `[EVENT]` system notifications.
 /// These are sent to the orchestrator for coordination but should not
 /// be forwarded to the user-facing chat on the radio.

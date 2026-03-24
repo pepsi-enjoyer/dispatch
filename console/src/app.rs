@@ -2,6 +2,8 @@
 
 use std::{
     io::Write,
+    sync::Arc,
+    thread,
     time::Instant,
 };
 
@@ -22,6 +24,7 @@ impl App {
         pane_cols: u16,
         tools: std::collections::HashMap<String, String>,
         default_tool: String,
+        merge_strategy: String,
         workspace: Workspace,
         scrollback_lines: u32,
         chat_tx: tokio::sync::broadcast::Sender<String>,
@@ -48,6 +51,7 @@ impl App {
             pane_cols,
             tools,
             default_tool,
+            merge_strategy,
             ticker_items: Vec::new(),
             ticker_pending: std::collections::VecDeque::new(),
             ticker_frame_counter: 0,
@@ -358,6 +362,7 @@ impl App {
                         repo_name_from_path(&target_repo), &target_repo,
                         Some(&full_prompt),
                         &callsign_for_prompt,
+                        &self.merge_strategy,
                     ) {
                         Some(slot) => { self.slots[slot_idx] = Some(slot); }
                         None => return tools::ToolResult::Error {
@@ -368,9 +373,20 @@ impl App {
                     // Existing idle agent: write the prompt to the PTY so it
                     // receives the new task (the agent process is still alive).
                     let slot = self.slots[slot_idx].as_mut().unwrap();
-                    let msg = format!("{}\r", full_prompt);
-                    let _ = slot.writer.write_all(msg.as_bytes());
-                    let _ = slot.writer.flush();
+                    if let Some(ref sw) = slot.shared_writer {
+                        // Copilot: type char-by-char on a background thread
+                        // to avoid blocking the main TUI loop.
+                        let w = Arc::clone(sw);
+                        let ts = Arc::clone(&slot.last_output_at);
+                        let prompt = full_prompt.clone();
+                        thread::spawn(move || {
+                            crate::pty::type_to_copilot(&w, &prompt, &ts);
+                        });
+                    } else {
+                        let msg = format!("{}\r", full_prompt);
+                        let _ = slot.writer.write_all(msg.as_bytes());
+                        let _ = slot.writer.flush();
+                    }
                 }
 
                 let callsign = {
@@ -515,9 +531,20 @@ impl App {
 
                 let slot = self.slots[idx].as_mut().unwrap();
                 let agent_name = slot.display_name().to_string();
-                let msg = format!("{}\r", text);
-                let _ = slot.writer.write_all(msg.as_bytes());
-                let _ = slot.writer.flush();
+                if let Some(ref sw) = slot.shared_writer {
+                    // Copilot: type char-by-char on a background thread
+                    // to avoid blocking the main TUI loop.
+                    let w = Arc::clone(sw);
+                    let ts = Arc::clone(&slot.last_output_at);
+                    let text = text.clone();
+                    thread::spawn(move || {
+                        crate::pty::type_to_copilot(&w, &text, &ts);
+                    });
+                } else {
+                    let msg = format!("{}\r", text);
+                    let _ = slot.writer.write_all(msg.as_bytes());
+                    let _ = slot.writer.flush();
+                }
                 *slot.last_output_at.lock().unwrap() = Instant::now();
                 slot.idle = false;
                 // Set task_id so idle detection tracks the follow-up work.
