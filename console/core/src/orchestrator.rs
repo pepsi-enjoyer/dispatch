@@ -1,13 +1,18 @@
 // Persistent LLM orchestrator (dispatch-h62).
 //
-// Spawns a headless `claude` process using stream-json I/O as the orchestrator.
+// Spawns a headless AI agent process as the orchestrator. Supports two protocols:
+// - Claude stream-json: the original protocol using `--output-format stream-json`
+// - ACP (Agent Client Protocol): JSON-RPC 2.0 over stdin/stdout, used by Copilot
+//   and other ACP-compatible agents.
+//
 // Voice transcripts and system events are piped in as user messages. The
 // orchestrator responds with reasoning and structured action JSON blocks,
 // which the console parses and executes.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 use std::thread;
 
 use crate::tools;
@@ -35,16 +40,31 @@ pub enum OrchestratorState {
     Dead,
 }
 
+/// Which wire protocol the orchestrator is using.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    /// Claude stream-json: NDJSON lines with `type` field.
+    StreamJson,
+    /// Agent Client Protocol: JSON-RPC 2.0 over stdin/stdout.
+    Acp,
+}
+
 /// A persistent orchestrator subprocess.
 pub struct Orchestrator {
     child: Child,
-    stdin: std::process::ChildStdin,
+    /// Shared writer for stdin. ACP reader thread also writes (to respond to
+    /// agent requests like `requestPermission`), so this is behind Arc<Mutex>.
+    writer: Arc<Mutex<BufWriter<std::process::ChildStdin>>>,
     rx: mpsc::Receiver<OrchestratorOutput>,
     pub state: OrchestratorState,
     /// Queued messages to send once the current turn completes.
     pending: std::collections::VecDeque<String>,
     /// Session ID from the init message.
     session_id: String,
+    /// Protocol in use.
+    protocol: Protocol,
+    /// Monotonically increasing JSON-RPC request ID (ACP only).
+    next_rpc_id: Arc<AtomicU64>,
 }
 
 // ── System prompt ────────────────────────────────────────────────────────────
@@ -86,20 +106,27 @@ pub fn build_system_prompt(
 /// Spawn the orchestrator process. Returns an error string if the spawn fails.
 /// `tool_key` is the configured AI agent name (e.g. "claude" or "copilot").
 /// `tool_cmd` is the resolved command to execute (from `[tools]` config).
+///
+/// Selects the protocol based on `tool_key`:
+/// - `"claude"` → stream-json (legacy)
+/// - anything else (including `"copilot"`) → ACP (Agent Client Protocol)
 pub fn spawn(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str) -> Result<Orchestrator, String> {
+    if tool_key == "claude" {
+        spawn_stream_json(system_prompt, cwd, tool_cmd)
+    } else {
+        spawn_acp(system_prompt, cwd, tool_key, tool_cmd)
+    }
+}
+
+/// Spawn orchestrator using Claude's stream-json protocol.
+fn spawn_stream_json(system_prompt: &str, cwd: &str, tool_cmd: &str) -> Result<Orchestrator, String> {
     let mut cmd = Command::new(tool_cmd);
-    // Common flags: streaming JSON protocol for multi-turn orchestrator.
     cmd.args([
         "-p",
         "--output-format", "stream-json",
         "--input-format", "stream-json",
+        "--verbose",
     ]);
-    // Tool-specific flags.
-    if tool_key == "claude" {
-        cmd.arg("--verbose");
-    } else if tool_key == "copilot" {
-        cmd.arg("--yolo");
-    }
     cmd.args(["--system-prompt", system_prompt]);
     cmd.current_dir(cwd);
     cmd.stdin(Stdio::piped());
@@ -114,6 +141,7 @@ pub fn spawn(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str) -> 
     let stdout = child.stdout.take()
         .ok_or_else(|| "failed to open orchestrator stdout".to_string())?;
 
+    let writer = Arc::new(Mutex::new(BufWriter::new(stdin)));
     let (tx, rx) = mpsc::channel();
     let (sid_tx, sid_rx) = mpsc::channel();
 
@@ -131,13 +159,11 @@ pub fn spawn(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str) -> 
                 continue;
             }
 
-            // Parse the JSON line.
             let parsed: serde_json::Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
 
-            // Capture session_id from the first message that has one.
             if !sent_sid {
                 if let Some(sid) = parsed.get("session_id").and_then(|v| v.as_str()) {
                     let _ = sid_tx.send(sid.to_string());
@@ -149,7 +175,6 @@ pub fn spawn(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str) -> 
 
             match msg_type {
                 "assistant" => {
-                    // Extract text from message.content[].text
                     if let Some(content) = parsed
                         .get("message")
                         .and_then(|m| m.get("content"))
@@ -167,29 +192,245 @@ pub fn spawn(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str) -> 
                     }
                 }
                 "result" => {
-                    // Don't emit Text here -- the same content was already sent
-                    // via the "assistant" message. Only signal turn completion.
                     let _ = tx.send(OrchestratorOutput::TurnComplete);
                 }
-                _ => {
-                    // init, rate_limit_event, etc. — ignore.
-                }
+                _ => {}
             }
         }
         let _ = tx.send(OrchestratorOutput::Exited);
     });
 
-    // Wait briefly for the init message to get the session_id.
     let session_id = sid_rx.recv_timeout(std::time::Duration::from_secs(10))
         .unwrap_or_else(|_| "default".to_string());
 
     Ok(Orchestrator {
         child,
-        stdin,
+        writer,
         rx,
         state: OrchestratorState::Idle,
         pending: std::collections::VecDeque::new(),
         session_id,
+        protocol: Protocol::StreamJson,
+        next_rpc_id: Arc::new(AtomicU64::new(1)),
+    })
+}
+
+// ── ACP (Agent Client Protocol) ─────────────────────────────────────────────
+
+/// Write a JSON-RPC line to the shared writer. Returns Err on I/O failure.
+fn rpc_write(writer: &Arc<Mutex<BufWriter<std::process::ChildStdin>>>, msg: &serde_json::Value) -> Result<(), String> {
+    let mut w = writer.lock().map_err(|e| format!("stdin lock: {e}"))?;
+    writeln!(w, "{}", msg).map_err(|e| format!("stdin write: {e}"))?;
+    w.flush().map_err(|e| format!("stdin flush: {e}"))
+}
+
+/// Read lines from stdout until we get a JSON-RPC response matching `expected_id`.
+/// Any agent requests received in the meantime are auto-handled (permissions
+/// approved, everything else rejected). Notifications are ignored during init.
+fn rpc_read_response(
+    reader: &mut BufReader<std::process::ChildStdout>,
+    writer: &Arc<Mutex<BufWriter<std::process::ChildStdin>>>,
+    expected_id: u64,
+) -> Result<serde_json::Value, String> {
+    let mut line_buf = String::new();
+    loop {
+        line_buf.clear();
+        let n = reader.read_line(&mut line_buf).map_err(|e| format!("stdout read: {e}"))?;
+        if n == 0 {
+            return Err("agent process closed stdout during init".to_string());
+        }
+        let trimmed = line_buf.trim();
+        if trimmed.is_empty() { continue; }
+
+        let parsed: serde_json::Value = serde_json::from_str(trimmed)
+            .map_err(|e| format!("json parse: {e}"))?;
+
+        let has_id = parsed.get("id").is_some();
+        let has_method = parsed.get("method").is_some();
+
+        // Response to our request.
+        if has_id && !has_method {
+            if let Some(id) = parsed.get("id").and_then(|v| v.as_u64()) {
+                if id == expected_id {
+                    if let Some(err) = parsed.get("error") {
+                        return Err(format!("RPC error: {}", err));
+                    }
+                    return Ok(parsed.get("result").cloned().unwrap_or(serde_json::Value::Null));
+                }
+            }
+        }
+
+        // Agent request — auto-handle during init.
+        if has_id && has_method {
+            handle_agent_request(writer, &parsed);
+        }
+        // Notifications during init — ignore.
+    }
+}
+
+/// Respond to an agent-initiated JSON-RPC request.
+/// Permissions are auto-approved; everything else is rejected.
+fn handle_agent_request(
+    writer: &Arc<Mutex<BufWriter<std::process::ChildStdin>>>,
+    parsed: &serde_json::Value,
+) {
+    let id = match parsed.get("id") {
+        Some(id) => id.clone(),
+        None => return,
+    };
+    let method = parsed.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    let response = match method {
+        "requestPermission" => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "outcome": "approved" }
+        }),
+        _ => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": "Method not supported by dispatch" }
+        }),
+    };
+    let _ = rpc_write(writer, &response);
+}
+
+/// Spawn orchestrator using the Agent Client Protocol (ACP).
+/// Works with Copilot and any other ACP-compatible agent.
+fn spawn_acp(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str) -> Result<Orchestrator, String> {
+    let mut cmd = Command::new(tool_cmd);
+    cmd.arg("--acp");
+    if tool_key == "copilot" {
+        cmd.arg("--yolo");
+    }
+    cmd.current_dir(cwd);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::null());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        format!("failed to spawn {}: {e} -- is it installed and on PATH?", tool_cmd)
+    })?;
+    let stdin = child.stdin.take()
+        .ok_or_else(|| "failed to open orchestrator stdin".to_string())?;
+    let mut stdout = BufReader::new(
+        child.stdout.take()
+            .ok_or_else(|| "failed to open orchestrator stdout".to_string())?
+    );
+
+    let writer = Arc::new(Mutex::new(BufWriter::new(stdin)));
+    let next_rpc_id = Arc::new(AtomicU64::new(1));
+
+    // ── 1. Initialize ────────────────────────────────────────────────────
+    let init_id = next_rpc_id.fetch_add(1, Ordering::SeqCst);
+    rpc_write(&writer, &serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": init_id,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": 1,
+            "clientInfo": { "name": "dispatch", "version": "1.0" },
+            "clientCapabilities": {}
+        }
+    }))?;
+    let _init_result = rpc_read_response(&mut stdout, &writer, init_id)?;
+
+    // ── 2. Create session ────────────────────────────────────────────────
+    let session_id_rpc = next_rpc_id.fetch_add(1, Ordering::SeqCst);
+    rpc_write(&writer, &serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": session_id_rpc,
+        "method": "session/new",
+        "params": {
+            "cwd": cwd,
+            "mcpServers": []
+        }
+    }))?;
+    let session_result = rpc_read_response(&mut stdout, &writer, session_id_rpc)?;
+    let session_id = session_result.get("sessionId")
+        .and_then(|v| v.as_str())
+        .ok_or("ACP session/new response missing sessionId")?
+        .to_string();
+
+    // ── 3. Send system prompt as first turn ──────────────────────────────
+    let sys_prompt_id = next_rpc_id.fetch_add(1, Ordering::SeqCst);
+    rpc_write(&writer, &serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": sys_prompt_id,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": &session_id,
+            "prompt": [{ "type": "text", "text": system_prompt }]
+        }
+    }))?;
+    // Drain all notifications and the response for the system-prompt turn.
+    // We discard the agent's reply — it's just an acknowledgement.
+    let _sys_result = rpc_read_response(&mut stdout, &writer, sys_prompt_id)?;
+
+    // ── 4. Start reader thread ───────────────────────────────────────────
+    let (tx, rx) = mpsc::channel();
+    let reader_writer = writer.clone();
+
+    thread::spawn(move || {
+        // Accumulate text chunks within a turn so we can emit the full text.
+        let mut turn_text = String::new();
+
+        for line in stdout.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() { continue; }
+
+            let parsed: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let has_id = parsed.get("id").is_some();
+            let has_method = parsed.get("method").is_some();
+            let has_result = parsed.get("result").is_some();
+            let has_error = parsed.get("error").is_some();
+
+            if has_id && (has_result || has_error) && !has_method {
+                // ── Response to a session/prompt request (turn complete) ──
+                if !turn_text.is_empty() {
+                    let _ = tx.send(OrchestratorOutput::Text(std::mem::take(&mut turn_text)));
+                }
+                let _ = tx.send(OrchestratorOutput::TurnComplete);
+            } else if has_method && !has_id {
+                // ── Notification from agent ──
+                let method = parsed.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                if method == "session/update" {
+                    if let Some(update) = parsed.pointer("/params/update") {
+                        let update_type = update.get("sessionUpdate")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if update_type == "agent_message_chunk" {
+                            if let Some(text) = update.pointer("/content/text").and_then(|v| v.as_str()) {
+                                turn_text.push_str(text);
+                            }
+                        }
+                        // agent_thought_chunk, tool calls, etc. are ignored for now.
+                    }
+                }
+            } else if has_id && has_method {
+                // ── Agent request (needs response) ──
+                handle_agent_request(&reader_writer, &parsed);
+            }
+        }
+        let _ = tx.send(OrchestratorOutput::Exited);
+    });
+
+    Ok(Orchestrator {
+        child,
+        writer,
+        rx,
+        state: OrchestratorState::Idle,
+        pending: std::collections::VecDeque::new(),
+        session_id,
+        protocol: Protocol::Acp,
+        next_rpc_id,
     })
 }
 
@@ -209,19 +450,34 @@ impl Orchestrator {
         self.send_raw(content);
     }
 
-    /// Send directly (bypasses queue check).
+    /// Send directly (bypasses queue check). Branches on protocol.
     fn send_raw(&mut self, content: &str) {
-        let msg = serde_json::json!({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": content
-            },
-            "session_id": self.session_id,
-            "parent_tool_use_id": null
-        });
-        let line = format!("{}\n", msg);
-        if self.stdin.write_all(line.as_bytes()).is_err() || self.stdin.flush().is_err() {
+        let msg = match self.protocol {
+            Protocol::StreamJson => {
+                serde_json::json!({
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": content
+                    },
+                    "session_id": self.session_id,
+                    "parent_tool_use_id": null
+                })
+            }
+            Protocol::Acp => {
+                let id = self.next_rpc_id.fetch_add(1, Ordering::SeqCst);
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": self.session_id,
+                        "prompt": [{ "type": "text", "text": content }]
+                    }
+                })
+            }
+        };
+        if rpc_write(&self.writer, &msg).is_err() {
             self.state = OrchestratorState::Dead;
             return;
         }
