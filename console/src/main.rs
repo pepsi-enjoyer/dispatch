@@ -524,8 +524,10 @@ fn main() -> io::Result<()> {
                     app.push_orch(OrchestratorEventKind::OrchestratorText { text: text.clone() });
 
                     // dispatch-chat: forward orchestrator reasoning to radio
-                    // (strip action blocks and internal [EVENT] lines).
+                    // (strip action blocks, system context tags, and internal
+                    // [EVENT] lines so raw LLM framework artifacts don't leak).
                     let chat_text = util::strip_action_blocks(&text);
+                    let chat_text = util::strip_system_tags(&chat_text);
                     let chat_text = util::strip_event_lines(&chat_text);
                     let chat_text = chat_text.trim();
                     if !chat_text.is_empty() {
