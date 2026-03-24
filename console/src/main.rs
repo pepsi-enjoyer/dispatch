@@ -145,7 +145,7 @@ fn main() -> io::Result<()> {
 
     // Load or generate TLS certificate (dispatch-ct2.6).
     let tls = config::load_or_create_tls();
-    let _tls_fingerprint = tls.fingerprint.clone();
+    let tls_fingerprint = tls.fingerprint.clone();
 
     // Broadcast channel for pushing chat messages to all connected radio clients (dispatch-chat).
     let (chat_tx, _) = tokio::sync::broadcast::channel::<String>(256);
@@ -178,7 +178,8 @@ fn main() -> io::Result<()> {
     }
 
     // Advertise via mDNS so the radio can discover us (dispatch-ct2.1).
-    let _mdns = mdns::advertise(cfg.server.port);
+    // Include TLS fingerprint in TXT records so the radio can pin the certificate.
+    let _mdns = mdns::advertise(cfg.server.port, Some(&tls_fingerprint));
 
     // Determine initial pane size from the terminal.
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((160, 40));
