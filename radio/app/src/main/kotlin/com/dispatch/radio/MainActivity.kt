@@ -97,6 +97,7 @@ class MainActivity : AppCompatActivity() {
         private const val IMAGE_PICK_REQUEST = 1002
         private const val IMAGE_CAPTURE_REQUEST = 1003
         private const val MAX_CHAT_MESSAGES = 100
+        private const val CHAT_TRIM_BATCH = 10
         private const val MAX_IMAGE_BYTES = 5 * 1024 * 1024 // 5 MB
     }
 
@@ -461,10 +462,10 @@ class MainActivity : AppCompatActivity() {
 
     // dispatch-chat: add a message to the scrollable chat log
     private fun addChatMessage(sender: String, text: String) {
-        // Trim old messages if over the cap
-        if (chatMessageCount >= MAX_CHAT_MESSAGES) {
-            llChat.removeViewAt(0)
-            chatMessageCount--
+        // Batch-remove old messages to reduce layout invalidation frequency
+        if (chatMessageCount >= MAX_CHAT_MESSAGES + CHAT_TRIM_BATCH) {
+            llChat.removeViews(0, CHAT_TRIM_BATCH)
+            chatMessageCount -= CHAT_TRIM_BATCH
         }
 
         val displayName = sender
