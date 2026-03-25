@@ -619,7 +619,7 @@ impl App {
                 tools::ToolResult::Repos { repos }
             }
 
-            tools::ToolCall::StrikeTeam { spec_file, name, repo } => {
+            tools::ToolCall::StrikeTeam { source_file, name, repo } => {
                 // Only one strike team at a time.
                 if self.strike_team.is_some() {
                     return tools::ToolResult::Error {
@@ -629,11 +629,11 @@ impl App {
 
                 let target_repo = self.resolve_repo(repo);
                 let st_name = name.as_deref().unwrap_or_else(|| {
-                    // Default name: spec filename without extension.
-                    spec_file.rsplit('/').next()
+                    // Default name: source filename without extension.
+                    source_file.rsplit('/').next()
                         .and_then(|f| f.rsplit('\\').next())
                         .and_then(|f| f.strip_suffix(".md"))
-                        .unwrap_or(spec_file)
+                        .unwrap_or(source_file)
                 }).to_string();
 
                 // Build planner prompt (no worktree — works in repo root).
@@ -643,12 +643,12 @@ impl App {
                      The document may be anything: a feature spec, a bug report, a performance review, \
                      a design doc, a list of TODOs, or any other document with actionable content. \
                      Your job is to parse whatever is in the document and extract concrete tasks from it.\n\n\
-                     1. Read the document at: {spec_file}\n\
+                     1. Read the document at: {source_file}\n\
                      2. Analyze its contents and identify all actionable items\n\
                      3. Create a task file at: .dispatch/tasks-{st_name}.md\n\n\
                      Use this EXACT format:\n\n\
                      # Strike Team: {st_name}\n\
-                     spec: {spec_file}\n\n\
+                     source: {source_file}\n\n\
                      ## T1: <short title>\n\
                      status: pending\n\
                      dependencies: none\n\
@@ -714,7 +714,7 @@ impl App {
                 let task_file_path = format!("{}/.dispatch/tasks-{}.md", target_repo, st_name);
                 self.strike_team = Some(strike_team::StrikeTeamState {
                     name: st_name.clone(),
-                    spec_file: spec_file.clone(),
+                    source_file: source_file.clone(),
                     repo: target_repo.clone(),
                     phase: strike_team::StrikeTeamPhase::Planning,
                     tasks: Vec::new(),
@@ -743,7 +743,7 @@ impl App {
 
                 tools::ToolResult::StrikeTeamAcknowledged {
                     name: st_name,
-                    spec_file: spec_file.to_string(),
+                    source_file: source_file.to_string(),
                     repo: target_repo,
                 }
             }
@@ -994,10 +994,10 @@ impl App {
                 None => break, // No more slots — wait for next tick.
             };
 
-            let (prompt, title, spec_file) = {
+            let (prompt, title, source_file) = {
                 let st = self.strike_team.as_ref().unwrap();
                 let task = st.tasks.iter().find(|t| t.id == *task_id).unwrap();
-                (task.prompt.clone(), task.title.clone(), st.spec_file.clone())
+                (task.prompt.clone(), task.title.clone(), st.source_file.clone())
             };
 
             let callsign = self.next_callsign()
@@ -1006,7 +1006,7 @@ impl App {
             let cmd = self.tool_cmd(&effective_tool).to_string();
             let full_prompt = format!(
                 "Your callsign is {}. Source document: {} -- read it for full context. {}",
-                callsign, spec_file, prompt
+                callsign, source_file, prompt
             );
 
             match dispatch_slot(
@@ -1104,12 +1104,12 @@ impl App {
 
     /// Dispatch a verifier agent after all tasks are done. Transitions to Verifying.
     fn strike_team_dispatch_verifier(&mut self) {
-        let (repo, spec_file, task_file_path, name) = {
+        let (repo, source_file, task_file_path, name) = {
             let st = match &self.strike_team {
                 Some(st) => st,
                 None => return,
             };
-            (st.repo.clone(), st.spec_file.clone(), st.task_file_path.clone(), st.name.clone())
+            (st.repo.clone(), st.source_file.clone(), st.task_file_path.clone(), st.name.clone())
         };
 
         let slot_idx = match self.slots.iter().position(|s| s.is_none()) {
@@ -1136,7 +1136,7 @@ impl App {
                 missed because they worked in isolation.\n\
              5. Fix any issues you find. If a fix requires code changes, make them directly.\n\
              6. Report your findings via your status message file, then stop.",
-            callsign, spec_file, task_file_path
+            callsign, source_file, task_file_path
         );
 
         match dispatch_slot(
