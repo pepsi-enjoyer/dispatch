@@ -65,8 +65,8 @@ prompt: Apply auth middleware to user endpoints.
 ## Lifecycle
 
 ```
-Idle --> Planning --> Executing --> Complete
-                 \-> Aborted (planner error)
+Idle --> Planning --> Executing --> Verifying --> Complete
+                 \-> Aborted (planner error / user abort)
 ```
 
 ### Planning Phase
@@ -89,7 +89,15 @@ Runs inside the existing 16ms main loop tick — no new threads or async.
    - Terminate the agent (free the slot for next wave)
    - Re-run from step 1
 6. When an agent process exits unexpectedly: mark task `failed`, continue
-7. When all tasks are `done` or `failed`: transition to Complete and notify the orchestrator via `[EVENT] STRIKE_TEAM_COMPLETE`
+7. When all tasks are `done` or `failed`: transition to Verifying phase
+
+### Verification Phase
+
+1. Console dispatches a **verifier agent** with access to the source document and task file
+2. Verifier reads the source document and checks each implementation against it
+3. Verifier looks for integration issues between tasks that isolated agents may have missed
+4. Verifier fixes any issues found, reports findings, then stops
+5. Console detects verifier idle/exit, transitions to Complete, and notifies the orchestrator via `[EVENT] STRIKE_TEAM_COMPLETE`
 
 ### Agent Lifecycle
 
@@ -186,6 +194,7 @@ Minimal additions:
   - `STRIKE TEAM: plan ready, 7 tasks`
   - `STRIKE TEAM: T3 -> Alpha`
   - `STRIKE TEAM: T3 done (Alpha)`
+  - `STRIKE TEAM: verifier -> Bravo`
   - `STRIKE TEAM: complete (7/7)`
 
 ## Architecture
@@ -196,7 +205,7 @@ Pure logic — no PTY, TUI, or async dependencies. Contains:
 
 - `TaskStatus` enum (`Pending`, `Active`, `Done`, `Failed`)
 - `Task` struct (id, title, status, dependencies, prompt, agent)
-- `StrikeTeamPhase` enum (`Planning`, `Executing`, `Complete`, `Aborted`)
+- `StrikeTeamPhase` enum (`Planning`, `Executing`, `Verifying`, `Complete`, `Aborted`)
 - `StrikeTeamState` struct (name, spec_file, repo, phase, tasks, task_file_path)
 - Parser: `parse_task_file(contents: &str) -> Vec<Task>`
 - Writer: `write_task_file(tasks: &[Task]) -> String`
@@ -216,8 +225,10 @@ Pure logic — no PTY, TUI, or async dependencies. Contains:
 - `execute_tool` arm for `StrikeTeam` (dispatch planner, init state)
 - `tick_strike_team()` (advance state machine each frame)
 - `strike_team_dispatch_ready()` (git pull, find ready tasks, dispatch agents)
+- `strike_team_dispatch_verifier()` (dispatch verifier agent after all tasks complete)
+- `strike_team_complete()` (transition from Verifying to Complete, notify orchestrator)
 - `strike_team_on_agent_idle(callsign)` (mark done, terminate, dispatch next wave)
-- `strike_team_on_agent_exit(slot_idx)` (mark failed)
+- `strike_team_on_agent_exit(slot_idx)` (mark failed, or complete if verifier exits)
 
 **`console/src/main.rs`** — Three hook points in the main loop:
 1. After idle detection (~line 361): call `app.tick_strike_team()`
@@ -255,7 +266,7 @@ Post-implementation comparison of this design doc against the code as committed.
 
 ~~The Planning phase detects planner completion by scanning slots for a `task_id` matching `"strike-team-planner:<name>"`. However, the main loop clears `task_id` (idle case) or removes the slot entirely (exit case) before `tick_strike_team()` runs, so the planner can never be found.~~
 
-**Fixed:** Added `planner_callsign: Option<String>` to `StrikeTeamState`. The callsign is stored at planner dispatch time and used directly by `tick_strike_team()` to detect idle/exit, bypassing the task_id scan entirely. The field is cleared when the Planning phase transitions out.
+**Fixed:** Added `phase_agent_callsign: Option<String>` to `StrikeTeamState`. The callsign is stored at planner/verifier dispatch time and used directly by `tick_strike_team()` to detect idle/exit, bypassing the task_id scan entirely. The field is cleared when the phase transitions out.
 
 ### Moderate: Design drift — RESOLVED
 

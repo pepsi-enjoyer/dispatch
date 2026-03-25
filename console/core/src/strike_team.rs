@@ -54,6 +54,7 @@ pub struct Task {
 pub enum StrikeTeamPhase {
     Planning,
     Executing,
+    Verifying,
     Complete,
     Aborted,
 }
@@ -67,11 +68,11 @@ pub struct StrikeTeamState {
     pub phase: StrikeTeamPhase,
     pub tasks: Vec<Task>,
     pub task_file_path: String,
-    /// Callsign of the planner agent during the Planning phase.
-    /// Persisted so tick_strike_team() can detect planner idle/exit
-    /// without scanning slots by task_id (which races against the
-    /// main loop clearing task_id before the tick runs).
-    pub planner_callsign: Option<String>,
+    /// Callsign of the phase-specific agent (planner during Planning,
+    /// verifier during Verifying). Persisted so tick_strike_team() can
+    /// detect idle/exit without scanning slots by task_id (which races
+    /// against the main loop clearing task_id before the tick runs).
+    pub phase_agent_callsign: Option<String>,
 }
 
 // ── Parsing ──────────────────────────────────────────────────────────────────

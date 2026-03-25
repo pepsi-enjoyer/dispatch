@@ -131,11 +131,15 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &mut App) {
         None if app.orch_error.is_some() => "  ORCH: FAILED",
         None => "  ORCH: STARTING",
     };
-    // Strike team progress indicator when executing.
+    // Strike team progress indicator when executing or verifying.
     let strike_indicator = match &app.strike_team {
         Some(st) if st.phase == StrikeTeamPhase::Executing => {
             let progress = strike_team::summary(&st.tasks);
             format!("  STRIKE TEAM {}", progress)
+        }
+        Some(st) if st.phase == StrikeTeamPhase::Verifying => {
+            let progress = strike_team::summary(&st.tasks);
+            format!("  STRIKE TEAM {} VERIFYING", progress)
         }
         _ => String::new(),
     };
