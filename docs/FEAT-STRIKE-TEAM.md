@@ -227,3 +227,41 @@ Pure logic — no PTY, TUI, or async dependencies. Contains:
 4. Main loop hooks in `main.rs`
 5. UI in `ui.rs`
 6. Docs updates
+
+## Implementation Review
+
+Post-implementation comparison of this design doc against the code as committed. Organized by severity.
+
+### Critical: Planner idle detection race
+
+The Planning phase detects planner completion by scanning slots for a `task_id` matching `"strike-team-planner:<name>"`. However, the main loop processes events in this order each tick:
+
+1. `child_exited` block (main.rs:281) — sets `slots[i] = None`
+2. Idle detection (main.rs:322) — sets `slot.task_id = None`
+3. `tick_strike_team()` (main.rs:373) — scans slots for planner by `task_id`
+
+By the time `tick_strike_team` runs, the planner's `task_id` has already been cleared (idle case) or the slot has been removed entirely (exit case). The planner cannot be found and the Planning phase never transitions to Executing.
+
+**Root cause:** The original implementation stored a `planner_callsign` field on `StrikeTeamState` to persist the planner identity across ticks. But this field is not part of the core struct (the struct only has `name`, `spec_file`, `repo`, `phase`, `tasks`, `task_file_path`), so the code did not compile. The compilation fix replaced the persistent field with a dynamic slot scan by `task_id`, which races against the main loop clearing the slot state.
+
+**Fix options:**
+- Add `planner_callsign: Option<String>` to `StrikeTeamState` (simplest).
+- Handle the Planning→Executing transition inside the idle detection or `child_exited` block directly, before slot state is cleared.
+
+### Moderate: Design drift
+
+**Function signatures — methods vs free functions.** The Architecture section describes `write_task_file(&self)`, `ready_tasks(&self)`, `task_for_agent()`, `summary()` as if they are methods on `StrikeTeamState`. The implementation uses free functions taking `&[Task]` slices (e.g., `write_task_file(tasks: &[Task])`, `summary(tasks: &[Task])`). This is better design — pure functions on slices are more composable and testable — but the doc should be updated to match.
+
+**ToolResult variant name.** The original app integration code referenced a `ToolResult::StrikeTeamStarted` variant with fields `{ name, planner_slot, planner_callsign }`. The actual enum defines `StrikeTeamAcknowledged` with fields `{ name, spec_file, repo }`. The variant name and fields were mismatched at the call site.
+
+**No cancellation mechanism.** The Edge Cases section says "console stops dispatching if strike team state is cleared" but no code path clears the state while a strike team is active. The only terminal transitions are Complete (all tasks done/failed) and Aborted (planner error). A user who manually terminates agents will find the strike team keeps dispatching new ones for ready tasks. Needs either a keybinding to abort, or logic that detects all agents were manually terminated.
+
+### Minor
+
+**Lifecycle diagram vs enum naming.** The lifecycle diagram says `\-> Failed (planner error)` but the enum uses `Aborted`. The Architecture section further down correctly says `Aborted`, so the diagram is internally inconsistent. The code matches the Architecture section.
+
+**Planner prompt punctuation.** The design doc template uses em-dashes (`—`) in the prompt text. The implementation uses double hyphens (`--`) at `app.rs:570`. Functionally irrelevant but the doc and code don't match verbatim.
+
+**Git pull errors silently ignored.** The execution loop runs `git pull --ff-only` with `let _ = Command::new("git")...output()`, discarding any error. If the pull fails (diverged history, network issues), agents dispatch against stale code. The design doc does not specify error handling for this step.
+
+**Orchestrator completion event undocumented.** The implementation sends `[EVENT] STRIKE_TEAM_COMPLETE name=<name> result=<summary>` to the orchestrator when all tasks finish (`app.rs:839`). This is a useful addition but is not mentioned anywhere in the design doc or SPEC.md.

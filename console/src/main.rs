@@ -279,31 +279,32 @@ fn main() -> io::Result<()> {
         // Close any slots whose child exited naturally (dispatch-bgz.9, dispatch-xje).
         let slot_count = app.slots.len();
         for i in 0..slot_count {
-            if let Some(s) = &app.slots[i] {
-                if s.child_exited.load(Ordering::Relaxed) {
-                    // Strike team: mark task failed on unexpected exit.
-                    app.strike_team_on_agent_exit(i);
-                    let callsign = s.display_name().to_string();
-                    let task_id = s.task_id.clone();
-                    app.slots[i] = None;
-                    // Sync ws_state so the handler knows this slot is empty (dispatch-boa).
-                    {
-                        let mut st = app.ws_state.lock().unwrap();
-                        st.slots[i] = None;
+            let child_exited = app.slots[i].as_ref().map_or(false, |s| {
+                s.child_exited.load(Ordering::Relaxed)
+            });
+            if child_exited {
+                // Strike team: mark task failed on unexpected exit.
+                app.strike_team_on_agent_exit(i);
+                let callsign = app.slots[i].as_ref().unwrap().display_name().to_string();
+                let task_id = app.slots[i].as_ref().unwrap().task_id.clone();
+                app.slots[i] = None;
+                // Sync ws_state so the handler knows this slot is empty (dispatch-boa).
+                {
+                    let mut st = app.ws_state.lock().unwrap();
+                    st.slots[i] = None;
+                }
+                app.broadcast_agents();
+                if let Some(id) = task_id {
+                    app.push_orch(OrchestratorEventKind::TaskComplete { id: id.clone(), agent: callsign.clone() });
+                    // Notify orchestrator of completion so it can decide next steps.
+                    if let Some(orch) = &mut app.orchestrator {
+                        orch.send_message(&format!("[EVENT] TASK_COMPLETE agent={} task={}", callsign, id));
                     }
-                    app.broadcast_agents();
-                    if let Some(id) = task_id {
-                        app.push_orch(OrchestratorEventKind::TaskComplete { id: id.clone(), agent: callsign.clone() });
-                        // Notify orchestrator of completion so it can decide next steps.
-                        if let Some(orch) = &mut app.orchestrator {
-                            orch.send_message(&format!("[EVENT] TASK_COMPLETE agent={} task={}", callsign, id));
-                        }
-                        app.push_ticker(format!("TASK COMPLETE: {} closed {} — slot {} now standby", callsign, id, i + 1));
-                    } else {
-                        app.push_ticker(format!("AGENT EXITED: {} (slot {}) — standby", callsign, i + 1));
-                        if let Some(orch) = &mut app.orchestrator {
-                            orch.send_message(&format!("[EVENT] AGENT_EXITED agent={} slot={}", callsign, i + 1));
-                        }
+                    app.push_ticker(format!("TASK COMPLETE: {} closed {} — slot {} now standby", callsign, id, i + 1));
+                } else {
+                    app.push_ticker(format!("AGENT EXITED: {} (slot {}) — standby", callsign, i + 1));
+                    if let Some(orch) = &mut app.orchestrator {
+                        orch.send_message(&format!("[EVENT] AGENT_EXITED agent={} slot={}", callsign, i + 1));
                     }
                 }
             }

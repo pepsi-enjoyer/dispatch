@@ -166,12 +166,10 @@ pub fn prepare_msg_file(repo_root: &str, callsign: &str) -> String {
     path
 }
 
-/// Spin until the PTY reader timestamp has not changed for SETTLE_MS,
+/// Spin until the PTY reader timestamp has not changed for `settle_ms`,
 /// meaning copilot has finished processing and rendering input.
-/// Gives up after TIMEOUT_MS to avoid hanging forever.
-fn wait_for_output_settle(output_ts: &Arc<Mutex<Instant>>) {
-    const SETTLE_MS: u128 = 150;
-    const TIMEOUT_MS: u128 = 5_000;
+/// Gives up after `timeout_ms` to avoid hanging forever.
+fn wait_for_output_settle_with(output_ts: &Arc<Mutex<Instant>>, settle_ms: u128, timeout_ms: u128) {
     let wall_start = Instant::now();
     let mut prev = *output_ts.lock().unwrap();
     loop {
@@ -179,13 +177,18 @@ fn wait_for_output_settle(output_ts: &Arc<Mutex<Instant>>) {
         let now_ts = *output_ts.lock().unwrap();
         if now_ts != prev {
             prev = now_ts;
-        } else if now_ts.elapsed().as_millis() >= SETTLE_MS {
+        } else if now_ts.elapsed().as_millis() >= settle_ms {
             break;
         }
-        if wall_start.elapsed().as_millis() >= TIMEOUT_MS {
+        if wall_start.elapsed().as_millis() >= timeout_ms {
             break;
         }
     }
+}
+
+/// Convenience wrapper with default settle/timeout for post-typing waits.
+fn wait_for_output_settle(output_ts: &Arc<Mutex<Instant>>) {
+    wait_for_output_settle_with(output_ts, 150, 5_000);
 }
 
 /// Open a PTY and spawn a process. Returns a SlotState on success.
@@ -335,17 +338,21 @@ pub fn dispatch_slot(
                 let last_output_for_delay = Arc::clone(&last_output_at);
                 let w = Arc::clone(&shared);
                 thread::spawn(move || {
-                    // Wait for copilot to produce its first output (prompt ready),
+                    // Wait for copilot to produce its first output (startup begins),
                     // or time out after 10 seconds.
                     let start = Instant::now();
                     loop {
                         thread::sleep(std::time::Duration::from_millis(500));
                         let last = *last_output_for_delay.lock().unwrap();
                         if last > start || start.elapsed() > std::time::Duration::from_secs(10) {
-                            thread::sleep(std::time::Duration::from_millis(1000));
                             break;
                         }
                     }
+                    // Wait for copilot's startup output to fully settle before
+                    // typing the prompt. The first output is just startup noise
+                    // (banner, loading); we need to wait until the interactive
+                    // prompt is actually ready (500ms of silence, up to 30s).
+                    wait_for_output_settle_with(&last_output_for_delay, 500, 30_000);
                     // Type each character individually to the PTY to simulate real
                     // keyboard input. Bulk writes cause copilot's TUI to treat input
                     // as a paste event where \r becomes a literal newline instead of
