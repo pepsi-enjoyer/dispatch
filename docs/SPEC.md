@@ -341,7 +341,7 @@ Each task agent follows the normal dispatch workflow: creates a worktree from la
 - **Max slots full**: ready tasks wait. As agents finish and slots free up, the next wave dispatches.
 - **Agent failure**: task marked `failed`. Its dependents stay `pending` forever (blocked by the failed dependency). Sibling tasks continue normally.
 - **Merge conflicts**: agents handle conflicts per their normal workflow. If unresolvable, the agent reports failure.
-- **Cancellation**: no special mechanism. User terminates agents manually. Console stops dispatching if strike team state is cleared.
+- **Cancellation**: press `s` in command mode to abort the active strike team. This transitions to the Aborted phase, stopping all future task dispatching. Active agents finish their current work but no new tasks are dispatched.
 - **One at a time**: only one strike team can be active at once. A second `strike_team` call returns an error.
 
 ---
@@ -688,6 +688,7 @@ While in input mode, `Escape` is the only key intercepted by the console -- it i
 | `n`               | Spawn new agent in empty targeted slot (next available callsign) |
 | `c`               | Interrupt orchestrator (cancel current response, restart)     |
 | `k`               | Kill agent in currently targeted slot (confirms first)       |
+| `s`               | Abort active strike team (stops dispatching new tasks)       |
 | `o`               | Toggle orchestrator view (replaces agent grid with event log) |
 | `p`               | Show/hide full PSK                                           |
 | `x`               | Show connection info overlay (address, port, PSK)            |

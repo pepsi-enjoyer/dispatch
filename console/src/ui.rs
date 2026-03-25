@@ -562,7 +562,7 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 pub fn render_help_overlay(f: &mut Frame, area: Rect) {
-    let r = centered_rect(52, 23, area);
+    let r = centered_rect(52, 24, area);
     f.render_widget(Clear, r);
     let lines = vec![
         Line::from(Span::styled(
@@ -580,6 +580,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::raw("  n            New agent in empty slot")),
         Line::from(Span::raw("  c            Interrupt orchestrator")),
         Line::from(Span::raw("  k            Kill target agent")),
+        Line::from(Span::raw("  s            Abort active strike team")),
         Line::from(Span::raw("  o            Toggle orchestrator view")),
         Line::from(Span::raw("  p            Toggle PSK visibility")),
         Line::from(Span::raw("  x            Show connection info")),

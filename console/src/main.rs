@@ -903,6 +903,11 @@ fn main() -> io::Result<()> {
                                     }
                                 }
 
+                                // Abort active strike team
+                                KeyCode::Char('s') => {
+                                    app.abort_strike_team();
+                                }
+
                                 KeyCode::Char('p') => app.psk_expanded = !app.psk_expanded,
                                 KeyCode::Char('x') => app.overlay = Overlay::ConnectionInfo,
                                 KeyCode::Char('?') => app.overlay = Overlay::Help,
