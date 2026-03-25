@@ -1,13 +1,13 @@
 # Strike Team
 
-A coordinated multi-agent execution mode that takes a spec or feature design document, breaks it into tasks with dependencies, then dispatches agents in parallel waves — maximizing throughput while respecting task ordering.
+A coordinated multi-agent execution mode that takes any document (spec, design doc, performance review, TODO list, etc.), breaks it into tasks with dependencies, then dispatches agents in parallel waves -- maximizing throughput while respecting task ordering.
 
 Named after the ICS (Incident Command System) term for a group of same-type units assembled for a specific mission.
 
 ## Overview
 
-1. User provides a spec file (e.g., `docs/auth-spec.md`)
-2. A **planner agent** reads the spec and creates a task file with dependencies
+1. User provides a document (e.g., `docs/auth-spec.md`, `docs/PERFORMANCE_REVIEW.md`)
+2. A **planner agent** reads the document and creates a task file with dependencies
 3. The console dispatches agents for all **ready** tasks (no unmet dependencies)
 4. When an agent finishes, it merges to main and is terminated to free the slot
 5. The console checks for newly unblocked tasks and dispatches the next wave
@@ -73,7 +73,7 @@ Idle --> Planning --> Executing --> Complete
 
 1. Orchestrator issues `strike_team(spec_file, name, repo)` tool call
 2. Console dispatches a planner agent to the repo root (no worktree)
-3. Planner reads the spec, creates `.dispatch/tasks-<name>.md`, reports task count via status message, then stops
+3. Planner reads the document, extracts actionable items, creates `.dispatch/tasks-<name>.md`, reports task count via status message, then stops
 4. Console detects planner idle/exit, parses the task file, transitions to Executing
 
 ### Execution Loop
@@ -106,13 +106,13 @@ On idle detection, the console **terminates** the agent to free the slot. This e
 ```json
 {
   "name": "strike_team",
-  "description": "Launch a Strike Team: break a spec into tasks with dependencies, then dispatch agents in parallel waves until all tasks are complete.",
+  "description": "Launch a Strike Team: read any document (spec, review, design doc, etc.), break it into tasks with dependencies, then dispatch agents in parallel waves until all tasks are complete.",
   "input_schema": {
     "type": "object",
     "properties": {
       "spec_file": {
         "type": "string",
-        "description": "Path to the spec/feature markdown file, relative to repo root."
+        "description": "Path to the document (spec, review, design doc, TODO list, etc.), relative to repo root."
       },
       "name": {
         "type": "string",
@@ -134,10 +134,15 @@ The planner is dispatched with a special prompt (overrides normal AGENTS.md work
 
 ```
 You are a task planner for the Dispatch Strike Team system. Your ONLY job is to
-read a spec file and create a task breakdown.
+read a document and break it down into actionable tasks.
 
-1. Read the spec file at: {spec_file}
-2. Create a task file at: .dispatch/tasks-{name}.md
+The document may be anything: a feature spec, a bug report, a performance review,
+a design doc, a list of TODOs, or any other document with actionable content.
+Your job is to parse whatever is in the document and extract concrete tasks from it.
+
+1. Read the document at: {spec_file}
+2. Analyze its contents and identify all actionable items
+3. Create a task file at: .dispatch/tasks-{name}.md
 
 Use this EXACT format:
 
@@ -156,21 +161,16 @@ dependencies: T1
 prompt: <first line of prompt>
   <more detail on indented continuation lines>
 
-EXAMPLE of a good prompt:
-
-prompt: Create a User struct in src/models/user.rs.
-  Fields: id (Uuid), email (String), name (String), created_at (DateTime).
-  Derive serde Serialize/Deserialize and Debug.
-  Add a User::new(email, name) constructor that generates the id and timestamp.
-  Add unit tests for User::new in the same file.
-
 RULES:
+- Read the document carefully and extract every actionable item as a task.
+- Each task prompt must be self-contained: include all relevant context, file paths,
+  code snippets, and acceptance criteria from the source document so the agent can
+  complete the task without reading the original document.
 - Each task must be completable by a single agent in one session.
 - Maximize parallelism: only add dependencies when truly required.
-- Write detailed, multi-line prompts with specific file paths, function signatures, and acceptance criteria.
-- Use 2-space indented continuation lines for multi-line prompts.
+- Write detailed, multi-line prompts using 2-space indented continuation lines.
 - Sequential IDs: T1, T2, T3, etc.
-- Aim for 3-15 tasks.
+- Aim for 3-15 tasks. Group small related items into a single task if needed.
 - Do NOT create a git worktree. Work directly in the repo root.
 - After creating the file, report the task count via your status message file, then stop.
 ```

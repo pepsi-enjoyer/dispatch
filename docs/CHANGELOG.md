@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.4.4
+
+### Changed
+
+- Strike team planner now accepts any document type (specs, performance reviews, design docs, TODO lists, etc.), not just formal coding specs. The planner prompt was generalized to read any document and intelligently extract actionable tasks from its contents.
+
 ## v0.4.3
 
 ### Changed

@@ -192,7 +192,7 @@ The console parses the `"action"` field to determine which tool to execute. Para
 | `list_agents` | _(none)_ | List all active agent slots with callsign, tool, working/idle status, and repo. |
 | `list_repos` | _(none)_ | List available repositories that agents can work in. |
 | `message_agent` | `agent`, `text` | Send text to an agent's terminal (PTY). Use for follow-up instructions or answering agent questions. |
-| `strike_team` | `spec_file` (required), `repo` (required), `name` (optional) | Launch a Strike Team: break a spec into tasks with dependencies, then dispatch agents in parallel waves until all tasks are complete. See [Strike Team](#strike-team). |
+| `strike_team` | `spec_file` (required), `repo` (required), `name` (optional) | Launch a Strike Team: read any document (spec, review, design doc, etc.), break it into tasks with dependencies, then dispatch agents in parallel waves until all tasks are complete. See [Strike Team](#strike-team). |
 
 The `agent` parameter accepts either a callsign (e.g. "Alpha") or a slot number (e.g. "1"), case-insensitive.
 
@@ -255,7 +255,7 @@ All voice prompts from the radio and keyboard input submitted in input mode are 
 
 ## Strike Team
 
-A coordinated multi-agent execution mode that takes a spec or feature design document, breaks it into tasks with dependencies, then dispatches agents in parallel waves -- maximizing throughput while respecting task ordering.
+A coordinated multi-agent execution mode that takes any document (spec, design doc, performance review, TODO list, etc.), breaks it into tasks with dependencies, then dispatches agents in parallel waves -- maximizing throughput while respecting task ordering.
 
 ### Lifecycle
 
@@ -267,7 +267,7 @@ Idle --> Planning --> Executing --> Complete
 ### How It Works
 
 1. The orchestrator issues a `strike_team(spec_file, name, repo)` action.
-2. The console dispatches a **planner agent** that reads the spec file and creates a task file (`.dispatch/tasks-<name>.md`) with dependency information.
+2. The console dispatches a **planner agent** that reads the document and creates a task file (`.dispatch/tasks-<name>.md`) with dependency information.
 3. Once the planner finishes, the console parses the task file and transitions to the Executing phase.
 4. The console scans for **ready** tasks (status `pending` with all dependencies `done`) and dispatches agents in parallel for each ready task that has an available slot.
 5. When an agent finishes, it merges to main and is terminated to free the slot.
@@ -329,7 +329,7 @@ Runs inside the existing 16ms main loop tick -- no new threads or async.
 
 1. `git pull --ff-only` in repo root (pick up prior merges from completed agents).
 2. Scan tasks: find all where status=`pending` and all deps are `done`.
-3. For each ready task with an available slot: dispatch a fresh agent with the task's prompt and a reference to the original spec file for context.
+3. For each ready task with an available slot: dispatch a fresh agent with the task's prompt and a reference to the source document for context.
 4. Update task file: status=`active`, agent=`<callsign>`.
 5. When an agent goes idle (existing 10s idle detection):
    - Mark task `done` in the task file.
