@@ -27,6 +27,8 @@ pub enum WsEvent {
     RadioDisconnected { addr: String },
     /// TLS handshake failed (client couldn't establish encrypted connection).
     TlsFailure { addr: String },
+    /// WebSocket server failed to start (e.g. port already in use).
+    WsServerFailed { error: String },
 }
 
 // --- Agent state ---------------------------------------------------------
