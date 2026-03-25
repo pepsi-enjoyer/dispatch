@@ -200,4 +200,8 @@ pub struct App {
     pub cached_clock_second: u64,
     /// Frame counter for throttling periodic work (agent message polling).
     pub frame_counter: u32,
+    /// Reusable char buffer for ticker_display() (avoids per-frame Vec<char> allocation).
+    pub ticker_char_buf: Vec<char>,
+    /// Reusable String buffer for ticker_display() (avoids per-frame String allocation).
+    pub ticker_str_buf: String,
 }

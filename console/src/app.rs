@@ -75,6 +75,8 @@ impl App {
             cached_clock: String::new(),
             cached_clock_second: 0,
             frame_counter: 0,
+            ticker_char_buf: Vec::new(),
+            ticker_str_buf: String::new(),
         }
     }
 
@@ -323,11 +325,17 @@ impl App {
     /// Build the visible ticker string for a given display width.
     /// Each item scrolls independently right-to-left.
     /// Item char at index i appears at screen position (width - offset + i).
-    pub fn ticker_display(&self, width: usize) -> String {
+    /// Reuses internal buffers to avoid per-frame allocations.
+    pub fn ticker_display(&mut self, width: usize) -> &str {
+        self.ticker_str_buf.clear();
         if self.ticker_items.is_empty() {
-            return " ".repeat(width);
+            for _ in 0..width {
+                self.ticker_str_buf.push(' ');
+            }
+            return &self.ticker_str_buf;
         }
-        let mut line = vec![' '; width];
+        self.ticker_char_buf.clear();
+        self.ticker_char_buf.resize(width, ' ');
         // Render older items first so newer items layer on top if they overlap.
         for item in &self.ticker_items {
             let start = item.offset.saturating_sub(width);
@@ -337,11 +345,12 @@ impl App {
                     break;
                 }
                 if pos >= 0 {
-                    line[pos as usize] = ch;
+                    self.ticker_char_buf[pos as usize] = ch;
                 }
             }
         }
-        line.into_iter().collect()
+        self.ticker_str_buf.extend(self.ticker_char_buf.iter());
+        &self.ticker_str_buf
     }
 
     /// Get cached clock string (HH:MM), updated at most once per second.
@@ -497,7 +506,7 @@ impl App {
                     let mut st = self.ws_state.lock().unwrap();
                     st.slots[slot_idx] = Some(ws_server::AgentSlot {
                         callsign: callsign.clone(),
-                        tool: effective_tool.clone(),
+                        tool: effective_tool,
                         status: ws_server::AgentStatus::Busy,
                         task: None,
                         repo: Some(repo_name_from_path(&target_repo).to_string()),
@@ -725,7 +734,7 @@ impl App {
                 {
                     let mut st = self.ws_state.lock().unwrap();
                     st.slots[slot_idx] = Some(ws_server::AgentSlot {
-                        callsign: phase_agent_callsign.clone(),
+                        callsign: phase_agent_callsign,
                         tool: effective_tool,
                         status: ws_server::AgentStatus::Busy,
                         task: None,

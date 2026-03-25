@@ -81,7 +81,7 @@ pub fn screen_to_lines(screen: &vt100::Screen) -> Vec<Line<'static>> {
 // ── rendering ─────────────────────────────────────────────────────────────────
 
 /// Render the LED-style scrolling ticker line (dispatch-ami).
-pub fn render_ticker(f: &mut Frame, area: Rect, app: &App) {
+pub fn render_ticker(f: &mut Frame, area: Rect, app: &mut App) {
     let width = area.width as usize;
     let text = app.ticker_display(width);
     let style = Style::default().fg(Color::Yellow);
@@ -112,7 +112,8 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &mut App) {
         }
     };
 
-    let clock = app.clock_display().to_string();
+    // Refresh cached clock (updates at most once per minute).
+    app.clock_display();
     // dispatch-sa1: show repo count in multi-repo mode.
     let workspace_indicator = if app.is_multi_repo() {
         format!("  REPOS: {}", app.repo_list().len())
@@ -158,7 +159,7 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &mut App) {
         strike_indicator,
         app.current_page + 1,
         app.total_pages(),
-        clock,
+        &app.cached_clock,
     );
 
     // Build left and right portions, pad gap to right-align, and truncate to fit.
@@ -414,9 +415,16 @@ pub fn render_orchestrator(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    // Build lines from events.
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for ev in &app.orch_log {
+    // Compute visible range, then only build lines for that range.
+    let visible = inner.height as usize;
+    let total = app.orch_log.len();
+    let max_scroll = total.saturating_sub(visible);
+    let scroll = app.orch_scroll.min(max_scroll);
+    let start = total.saturating_sub(visible + scroll);
+    let end = (start + visible).min(total);
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(end - start);
+    for ev in app.orch_log.iter().skip(start).take(end - start) {
         let (icon, style, body) = match &ev.kind {
             OrchestratorEventKind::VoiceTranscript { text } => (
                 "MIC",
@@ -484,17 +492,7 @@ pub fn render_orchestrator(f: &mut Frame, area: Rect, app: &App) {
         ]));
     }
 
-    // Apply scroll from bottom.
-    let visible = inner.height as usize;
-    let total = lines.len();
-    let max_scroll = total.saturating_sub(visible);
-    let scroll = app.orch_scroll.min(max_scroll);
-    let start = total.saturating_sub(visible + scroll);
-    let end = (start + visible).min(total);
-    // drain() moves Lines out of the vec without deep-cloning.
-    let visible_lines: Vec<Line<'static>> = lines.drain(start..end).collect();
-
-    let paragraph = Paragraph::new(Text::from(visible_lines));
+    let paragraph = Paragraph::new(Text::from(lines));
     f.render_widget(paragraph, inner);
 
     // Scroll indicator on the right edge.

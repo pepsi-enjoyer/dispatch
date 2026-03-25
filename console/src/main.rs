@@ -633,7 +633,7 @@ fn main() -> io::Result<()> {
                     .split(full);
 
                 ui::render_header(f, chunks[0], &mut app);
-                ui::render_ticker(f, chunks[1], &app);
+                ui::render_ticker(f, chunks[1], &mut app);
 
                 // Skip pane/orch rendering when a full-screen overlay covers them.
                 let has_fullscreen_overlay = matches!(
