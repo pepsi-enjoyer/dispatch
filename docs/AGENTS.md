@@ -31,7 +31,14 @@ Send messages at these points:
 
 **CRITICAL: Every task MUST end with at least one status message.** Never silently return to the prompt. Whether you made changes, found an answer, or hit a problem -- send a message. This is the ONLY way your results reach Dispatch. Returning to the prompt without sending a message means your task produced no output and will be treated as a failure.
 
-Keep messages to one sentence. Do not include file paths or code.
+**Message style -- be brief.** Each message must be one sentence. Do not include file paths, code, implementation details, or step-by-step narration. Dispatch reads these on a small phone screen over a radio-style interface -- every message scrolls across a ticker. Think of each message as a radio transmission: state the outcome, not the process.
+
+- GOOD: `"Done. Added retry logic to the upload handler, committed and pushed."`
+- GOOD: `"Done. Could not complete -- test suite requires a database connection."`
+- BAD: `"Updated src/handlers/upload.rs to add exponential backoff with jitter, max 3 retries, base delay 500ms. Also modified src/config.rs to add retry_count and retry_delay fields to the Config struct. Updated tests in tests/upload_test.rs."`
+- BAD: Sending 5+ separate messages narrating each step as you work.
+
+Send at most 2-3 messages per task: one when starting, one when done, and optionally one if you hit a significant blocker. Do not narrate your progress -- work silently, then report the result.
 
 ## Workflow
 
