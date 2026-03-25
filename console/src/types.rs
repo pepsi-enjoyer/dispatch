@@ -184,8 +184,8 @@ pub struct App {
     pub user_callsign: String,
     /// Display name for the console/orchestrator (default: "Console").
     pub console_name: String,
-    /// Active strike team state (None when no strike team is running).
-    pub strike_team: Option<strike_team::StrikeTeamState>,
+    /// Active strike teams (multiple can run concurrently).
+    pub strike_teams: Vec<strike_team::StrikeTeamState>,
     /// Whether the current orchestrator turn was triggered by user voice/text input.
     /// Snapshotted before collecting orchestrator outputs each frame. Used to gate
     /// destructive actions (terminate) so the LLM cannot self-hallucinate user input
