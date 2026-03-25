@@ -139,6 +139,24 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    /**
+     * Cycle to the next saved connection profile and reconnect.
+     * Called on a short Volume Up tap. If there are fewer than 2 profiles,
+     * gives a double-pulse to indicate there's nothing to cycle to.
+     */
+    private fun cycleProfile() {
+        val nextName = settings.nextProfileName()
+        if (nextName == null) {
+            haptics.doublePulse()
+            return
+        }
+        settings.loadProfile(nextName)
+        haptics.targetChange()
+        addChatMessage("System", "Profile: $nextName")
+        setConnected(false)
+        connectServiceWebSocket()
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -161,6 +179,7 @@ class MainActivity : AppCompatActivity() {
         volumeUpHandler = VolumeUpHandler(
             context = this,
             haptics = haptics,
+            onTap = ::cycleProfile,
         )
 
         pttManager = PushToTalkManager(
