@@ -662,6 +662,7 @@ impl App {
                     phase: strike_team::StrikeTeamPhase::Planning,
                     tasks: Vec::new(),
                     task_file_path,
+                    planner_callsign: Some(planner_callsign.clone()),
                 });
 
                 self.push_orch(OrchestratorEventKind::Dispatched {
@@ -761,79 +762,75 @@ impl App {
 
         match phase {
             strike_team::StrikeTeamPhase::Planning => {
-                // Check if the planner agent is idle (finished planning).
-                // Find the planner by scanning slots for the strike-team-planner task.
-                let st_name = match &self.strike_team {
-                    Some(st) => st.name.clone(),
+                // Check if the planner agent is idle or exited.
+                // Use the persisted planner_callsign rather than scanning
+                // slots by task_id, which races against the main loop
+                // clearing task_id before this tick runs.
+                let cs = match &self.strike_team {
+                    Some(st) => match &st.planner_callsign {
+                        Some(cs) => cs.clone(),
+                        None => return,
+                    },
                     None => return,
                 };
-                let planner_task_id = format!("strike-team-planner:{}", st_name);
-                let planner_cs: Option<String> = self.slots.iter().find_map(|s| {
-                    s.as_ref().and_then(|slot| {
-                        if slot.task_id.as_deref() == Some(planner_task_id.as_str()) {
-                            Some(slot.display_name().to_string())
-                        } else {
-                            None
-                        }
+
+                // Planner is idle when its slot exists but task_id has been cleared.
+                let planner_idle = self.slots.iter().any(|s| {
+                    s.as_ref().map_or(false, |slot| {
+                        slot.display_name().eq_ignore_ascii_case(&cs) && slot.task_id.is_none()
                     })
                 });
-                if let Some(cs) = &planner_cs {
-                    let planner_idle = self.slots.iter().any(|s| {
-                        s.as_ref().map_or(false, |slot| {
-                            slot.display_name().eq_ignore_ascii_case(cs) && slot.task_id.is_none()
-                        })
-                    });
-                    // Also check if planner exited (slot is gone).
-                    let planner_gone = !self.slots.iter().any(|s| {
-                        s.as_ref().map_or(false, |slot| {
-                            slot.display_name().eq_ignore_ascii_case(cs)
-                        })
-                    });
+                // Planner exited when its slot is gone entirely.
+                let planner_gone = !self.slots.iter().any(|s| {
+                    s.as_ref().map_or(false, |slot| {
+                        slot.display_name().eq_ignore_ascii_case(&cs)
+                    })
+                });
 
-                    if planner_idle || planner_gone {
-                        // Parse the task file and transition to Executing.
-                        let st = self.strike_team.as_mut().unwrap();
-                        let task_file = &st.task_file_path;
-                        match std::fs::read_to_string(task_file) {
-                            Ok(contents) => {
-                                st.tasks = strike_team::parse_task_file(&contents);
-                                let task_count = st.tasks.len();
-                                if task_count == 0 {
-                                    st.phase = strike_team::StrikeTeamPhase::Aborted;
-                                    let name = st.name.clone();
-                                    self.push_ticker(format!("STRIKE TEAM: {} aborted — no tasks found", name));
-                                } else {
-                                    st.phase = strike_team::StrikeTeamPhase::Executing;
-                                    let name = st.name.clone();
-                                    self.push_ticker(format!("STRIKE TEAM: plan ready, {} tasks", task_count));
-                                    self.push_chat("System", &format!("Strike Team '{}': plan ready with {} tasks.", name, task_count));
-                                }
-                            }
-                            Err(_) => {
+                if planner_idle || planner_gone {
+                    // Parse the task file and transition to Executing.
+                    let st = self.strike_team.as_mut().unwrap();
+                    st.planner_callsign = None; // No longer needed.
+                    let task_file = &st.task_file_path;
+                    match std::fs::read_to_string(task_file) {
+                        Ok(contents) => {
+                            st.tasks = strike_team::parse_task_file(&contents);
+                            let task_count = st.tasks.len();
+                            if task_count == 0 {
                                 st.phase = strike_team::StrikeTeamPhase::Aborted;
                                 let name = st.name.clone();
-                                self.push_ticker(format!("STRIKE TEAM: {} aborted — task file not found", name));
+                                self.push_ticker(format!("STRIKE TEAM: {} aborted — no tasks found", name));
+                            } else {
+                                st.phase = strike_team::StrikeTeamPhase::Executing;
+                                let name = st.name.clone();
+                                self.push_ticker(format!("STRIKE TEAM: plan ready, {} tasks", task_count));
+                                self.push_chat("System", &format!("Strike Team '{}': plan ready with {} tasks.", name, task_count));
                             }
                         }
+                        Err(_) => {
+                            st.phase = strike_team::StrikeTeamPhase::Aborted;
+                            let name = st.name.clone();
+                            self.push_ticker(format!("STRIKE TEAM: {} aborted — task file not found", name));
+                        }
+                    }
 
-                        // Terminate the planner agent to free the slot.
-                        if planner_idle {
-                            if let Some(idx) = self.slots.iter().position(|s| {
-                                s.as_ref().map_or(false, |slot| {
-                                    slot.display_name().eq_ignore_ascii_case(cs)
-                                })
-                            }) {
-                                let callsign = self.slots[idx].as_ref().unwrap().display_name().to_string();
-                                crate::pty::terminate_slot(&mut self.slots[idx]);
-                                self.push_orch(OrchestratorEventKind::Terminated {
-                                    agent: callsign, slot: idx + 1,
-                                });
-                                {
-                                    let mut wst = self.ws_state.lock().unwrap();
-                                    wst.slots[idx] = None;
-                                }
-                                self.broadcast_agents();
+                    // Terminate the planner agent to free the slot.
+                    if planner_idle {
+                        if let Some(idx) = self.slots.iter().position(|s| {
+                            s.as_ref().map_or(false, |slot| {
+                                slot.display_name().eq_ignore_ascii_case(&cs)
+                            })
+                        }) {
+                            let callsign = self.slots[idx].as_ref().unwrap().display_name().to_string();
+                            crate::pty::terminate_slot(&mut self.slots[idx]);
+                            self.push_orch(OrchestratorEventKind::Terminated {
+                                agent: callsign, slot: idx + 1,
+                            });
+                            {
+                                let mut wst = self.ws_state.lock().unwrap();
+                                wst.slots[idx] = None;
                             }
+                            self.broadcast_agents();
                         }
                     }
                 }

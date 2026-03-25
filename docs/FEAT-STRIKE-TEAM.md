@@ -232,21 +232,11 @@ Pure logic — no PTY, TUI, or async dependencies. Contains:
 
 Post-implementation comparison of this design doc against the code as committed. Organized by severity.
 
-### Critical: Planner idle detection race
+### ~~Critical: Planner idle detection race~~ (resolved)
 
-The Planning phase detects planner completion by scanning slots for a `task_id` matching `"strike-team-planner:<name>"`. However, the main loop processes events in this order each tick:
+~~The Planning phase detects planner completion by scanning slots for a `task_id` matching `"strike-team-planner:<name>"`. However, the main loop clears `task_id` (idle case) or removes the slot entirely (exit case) before `tick_strike_team()` runs, so the planner can never be found.~~
 
-1. `child_exited` block (main.rs:281) — sets `slots[i] = None`
-2. Idle detection (main.rs:322) — sets `slot.task_id = None`
-3. `tick_strike_team()` (main.rs:373) — scans slots for planner by `task_id`
-
-By the time `tick_strike_team` runs, the planner's `task_id` has already been cleared (idle case) or the slot has been removed entirely (exit case). The planner cannot be found and the Planning phase never transitions to Executing.
-
-**Root cause:** The original implementation stored a `planner_callsign` field on `StrikeTeamState` to persist the planner identity across ticks. But this field is not part of the core struct (the struct only has `name`, `spec_file`, `repo`, `phase`, `tasks`, `task_file_path`), so the code did not compile. The compilation fix replaced the persistent field with a dynamic slot scan by `task_id`, which races against the main loop clearing the slot state.
-
-**Fix options:**
-- Add `planner_callsign: Option<String>` to `StrikeTeamState` (simplest).
-- Handle the Planning→Executing transition inside the idle detection or `child_exited` block directly, before slot state is cleared.
+**Fixed:** Added `planner_callsign: Option<String>` to `StrikeTeamState`. The callsign is stored at planner dispatch time and used directly by `tick_strike_team()` to detect idle/exit, bypassing the task_id scan entirely. The field is cleared when the Planning phase transitions out.
 
 ### Moderate: Design drift
 
