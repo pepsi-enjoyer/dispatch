@@ -29,11 +29,43 @@ pub type ChatBroadcast = tokio::sync::broadcast::Sender<String>;
 
 /// Start the WebSocket server on `0.0.0.0:{port}` with TLS.
 /// Accepts connections only when the `?psk=<key>` query parameter matches.
+///
+/// Retries binding up to 5 times with 2-second delays to handle the common
+/// case where a previous console instance is still releasing the port.
+/// On failure, sends a WsServerFailed event so the TUI can display the error.
 pub async fn run_server(state: SharedState, port: u16, psk: String, tls: TlsAcceptor, chat_tx: ChatBroadcast) {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = TcpListener::bind(addr)
-        .await
-        .expect("failed to bind WebSocket server");
+
+    let mut last_err = String::new();
+    let mut listener_opt = None;
+    for attempt in 1..=5 {
+        match TcpListener::bind(addr).await {
+            Ok(l) => {
+                listener_opt = Some(l);
+                break;
+            }
+            Err(e) => {
+                last_err = format!("attempt {}/5: {}", attempt, e);
+                if attempt < 5 {
+                    // Sleep before retry. Uses std::thread::sleep to avoid adding
+                    // the tokio "time" feature just for this startup path.
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            }
+        }
+    }
+
+    let listener = match listener_opt {
+        Some(l) => l,
+        None => {
+            let msg = format!("failed to bind port {}: {}", port, last_err);
+            let st = state.lock().unwrap();
+            if let Some(tx) = &st.event_tx {
+                let _ = tx.send(WsEvent::WsServerFailed { error: msg });
+            }
+            return;
+        }
+    };
 
     loop {
         let (stream, peer_addr) = match listener.accept().await {

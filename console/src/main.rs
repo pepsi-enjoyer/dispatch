@@ -489,6 +489,10 @@ fn main() -> io::Result<()> {
                         app.push_ticker("IMAGE ERROR: invalid base64 data".to_string());
                     }
                 }
+                ws_server::WsEvent::WsServerFailed { error } => {
+                    app.push_ticker(format!("WS SERVER FAILED: {}", error));
+                    app.push_chat("System", &format!("WebSocket server failed: {}", error));
+                }
                 ws_server::WsEvent::Interrupt => {
                     if let Some(orch) = &mut app.orchestrator {
                         orch.interrupt();
