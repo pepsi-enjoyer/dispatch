@@ -994,6 +994,21 @@ impl App {
         }
     }
 
+    /// Abort the active strike team. Transitions to Aborted phase so no new
+    /// tasks are dispatched. Active agents continue but nothing new is started.
+    pub fn abort_strike_team(&mut self) {
+        let st = match &mut self.strike_team {
+            Some(st) if st.phase != strike_team::StrikeTeamPhase::Complete
+                      && st.phase != strike_team::StrikeTeamPhase::Aborted => st,
+            _ => return,
+        };
+        st.phase = strike_team::StrikeTeamPhase::Aborted;
+        let name = st.name.clone();
+        let summary = strike_team::summary(&st.tasks);
+        self.push_ticker(format!("STRIKE TEAM: {} aborted ({})", name, summary));
+        self.push_chat("System", &format!("Strike Team '{}': aborted by user ({}).", name, summary));
+    }
+
     /// Called when an agent process exits unexpectedly. If the agent was working
     /// on a strike team task, mark the task as failed.
     pub fn strike_team_on_agent_exit(&mut self, slot_idx: usize) {

@@ -180,16 +180,17 @@ Pure logic — no PTY, TUI, or async dependencies. Contains:
 - `Task` struct (id, title, status, dependencies, prompt, agent)
 - `StrikeTeamPhase` enum (`Planning`, `Executing`, `Complete`, `Aborted`)
 - `StrikeTeamState` struct (name, spec_file, repo, phase, tasks, task_file_path)
-- Parser: `parse_task_file(contents) -> Vec<Task>`
-- Writer: `write_task_file(&self) -> String`
-- Readiness: `ready_tasks(&self) -> Vec<&Task>`
-- Mutations: `assign_task()`, `complete_task()`, `task_for_agent()`, `is_complete()`, `summary()`
+- Parser: `parse_task_file(contents: &str) -> Vec<Task>`
+- Writer: `write_task_file(tasks: &[Task]) -> String`
+- Readiness: `ready_tasks(tasks: &[Task]) -> Vec<&Task>`
+- Queries: `task_for_agent(tasks: &[Task], callsign: &str) -> Option<&Task>`, `is_complete(tasks: &[Task]) -> bool`, `summary(tasks: &[Task]) -> String`
+- Mutations: `assign_task(tasks: &mut [Task], ...)`, `complete_task(tasks: &mut [Task], ...)`, `fail_task(tasks: &mut [Task], ...)`
 
 ### Changes to existing files
 
 **`console/core/src/lib.rs`** — `pub mod strike_team;`
 
-**`console/core/src/tools.rs`** — Add `StrikeTeam` variant to `ToolCall` and `ToolResult` enums, tool definition JSON, parser arm.
+**`console/core/src/tools.rs`** — Add `StrikeTeam` variant to `ToolCall` enum and `StrikeTeamAcknowledged { name, spec_file, repo }` variant to `ToolResult` enum. Add tool definition JSON and parser arm.
 
 **`console/src/types.rs`** — Add `strike_team: Option<StrikeTeamState>` to `App`.
 
@@ -216,7 +217,7 @@ Pure logic — no PTY, TUI, or async dependencies. Contains:
 - **Max slots full**: ready tasks wait. As agents finish and slots free up, next wave dispatches.
 - **Agent failure**: task marked `failed`. Its dependents stay `pending` forever (blocked). Siblings continue normally.
 - **Merge conflicts**: agents already handle conflicts per AGENTS.md. If unresolvable, agent reports failure.
-- **Cancellation**: no special mechanism. User terminates agents manually. Console stops dispatching if strike team state is cleared.
+- **Cancellation**: press `s` in command mode to abort the active strike team. This transitions the strike team to the Aborted phase, which stops all future task dispatching. Active agents are not killed — they finish their current work normally but no new tasks are dispatched.
 - **One at a time**: only one strike team active at once. Second `strike_team` call returns an error.
 
 ## Implementation Sequence
@@ -248,13 +249,13 @@ By the time `tick_strike_team` runs, the planner's `task_id` has already been cl
 - Add `planner_callsign: Option<String>` to `StrikeTeamState` (simplest).
 - Handle the Planning→Executing transition inside the idle detection or `child_exited` block directly, before slot state is cleared.
 
-### Moderate: Design drift
+### Moderate: Design drift — RESOLVED
 
-**Function signatures — methods vs free functions.** The Architecture section describes `write_task_file(&self)`, `ready_tasks(&self)`, `task_for_agent()`, `summary()` as if they are methods on `StrikeTeamState`. The implementation uses free functions taking `&[Task]` slices (e.g., `write_task_file(tasks: &[Task])`, `summary(tasks: &[Task])`). This is better design — pure functions on slices are more composable and testable — but the doc should be updated to match.
+**Function signatures — methods vs free functions.** The Architecture section describes `write_task_file(&self)`, `ready_tasks(&self)`, `task_for_agent()`, `summary()` as if they are methods on `StrikeTeamState`. The implementation uses free functions taking `&[Task]` slices (e.g., `write_task_file(tasks: &[Task])`, `summary(tasks: &[Task])`). This is better design — pure functions on slices are more composable and testable — but the doc should be updated to match. **Fixed:** Architecture section updated to show actual free function signatures with `&[Task]` parameters.
 
-**ToolResult variant name.** The original app integration code referenced a `ToolResult::StrikeTeamStarted` variant with fields `{ name, planner_slot, planner_callsign }`. The actual enum defines `StrikeTeamAcknowledged` with fields `{ name, spec_file, repo }`. The variant name and fields were mismatched at the call site.
+**ToolResult variant name.** The original app integration code referenced a `ToolResult::StrikeTeamStarted` variant with fields `{ name, planner_slot, planner_callsign }`. The actual enum defines `StrikeTeamAcknowledged` with fields `{ name, spec_file, repo }`. The variant name and fields were mismatched at the call site. **Fixed:** Architecture section updated to explicitly name the `StrikeTeamAcknowledged { name, spec_file, repo }` variant.
 
-**No cancellation mechanism.** The Edge Cases section says "console stops dispatching if strike team state is cleared" but no code path clears the state while a strike team is active. The only terminal transitions are Complete (all tasks done/failed) and Aborted (planner error). A user who manually terminates agents will find the strike team keeps dispatching new ones for ready tasks. Needs either a keybinding to abort, or logic that detects all agents were manually terminated.
+**No cancellation mechanism.** The Edge Cases section says "console stops dispatching if strike team state is cleared" but no code path clears the state while a strike team is active. The only terminal transitions are Complete (all tasks done/failed) and Aborted (planner error). A user who manually terminates agents will find the strike team keeps dispatching new ones for ready tasks. **Fixed:** Added `abort_strike_team()` method to `App` and wired it to the `s` keybinding in command mode. Pressing `s` transitions the strike team to Aborted phase, stopping all future dispatching. Active agents finish normally. Edge Cases sections in FEAT-STRIKE-TEAM.md and SPEC.md updated, keybinding added to SPEC.md, help overlay, and main loop.
 
 ### Minor
 
