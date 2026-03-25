@@ -31,20 +31,22 @@ class VolumeUpHandler(
 
     // Stashed references so the delayed runnable can show the overlay
     private var pendingAgents: List<Agent> = emptyList()
+    private var pendingOrchestratorStatus: String? = null
 
     private val showOverlayRunnable = Runnable {
         if (isKeyDown && VolumeKeyBridge.isActivityInForeground) {
-            statusOverlay = AgentStatusOverlay(context).also { it.show(pendingAgents) }
+            statusOverlay = AgentStatusOverlay(context).also { it.show(pendingAgents, pendingOrchestratorStatus) }
             overlayShown = true
         }
     }
 
     /** Call from Activity.onKeyDown for KEYCODE_VOLUME_UP. Returns true to consume. */
-    fun onKeyDown(agents: List<Agent>): Boolean {
+    fun onKeyDown(agents: List<Agent>, orchestratorStatus: String?): Boolean {
         if (isKeyDown) return true // Ignore key-repeat events while held
         isKeyDown = true
         overlayShown = false
         pendingAgents = agents
+        pendingOrchestratorStatus = orchestratorStatus
         handler.postDelayed(showOverlayRunnable, HOLD_THRESHOLD_MS)
         return true
     }
@@ -56,6 +58,7 @@ class VolumeUpHandler(
         isKeyDown = false
         overlayShown = false
         pendingAgents = emptyList()
+        pendingOrchestratorStatus = null
 
         if (wasHold) {
             haptics.shortPulse()

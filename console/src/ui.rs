@@ -1,7 +1,7 @@
 // UI rendering: header, footer, panes, overlays, orchestrator view.
 
 use dispatch_core::orchestrator;
-use dispatch_core::strike_team::StrikeTeamPhase;
+use dispatch_core::strike_team::{self, StrikeTeamPhase};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -126,8 +126,8 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
     // Strike team progress indicator when executing.
     let strike_indicator = match &app.strike_team {
         Some(st) if st.phase == StrikeTeamPhase::Executing => {
-            let (done, total) = st.summary();
-            format!("  STRIKE TEAM {}/{}", done, total)
+            let progress = strike_team::summary(&st.tasks);
+            format!("  STRIKE TEAM {}", progress)
         }
         _ => String::new(),
     };
@@ -218,7 +218,7 @@ fn pane_info_strip(global_idx: usize, local_idx: usize, app: &App) -> Text<'stat
             let strike_task_label = app
                 .strike_team
                 .as_ref()
-                .and_then(|st| st.task_for_agent(&agent.callsign))
+                .and_then(|st| strike_team::task_for_agent(&st.tasks, &agent.callsign))
                 .map(|t| format!(" [{}]", t.id))
                 .unwrap_or_default();
             // Activity indicator: shows WORK or IDLE based on PTY output.

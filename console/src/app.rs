@@ -105,6 +105,7 @@ impl App {
             queued_tasks: st.queued_tasks.len() as u32,
             user_callsign: Some(st.user_callsign.clone()),
             console_name: Some(st.console_name.clone()),
+            orchestrator_status: Some(st.orchestrator_status.clone()),
             seq: None,
         };
         if let Ok(json) = serde_json::to_string(&msg) {
@@ -122,6 +123,39 @@ impl App {
 
     pub fn active_count(&self) -> usize {
         self.slots.iter().filter(|s| s.is_some()).count()
+    }
+
+    /// Compute the current orchestrator status string and, if it changed,
+    /// sync it into the shared WebSocket state and broadcast to radio clients.
+    pub fn sync_orchestrator_status(&self) {
+        let status = self.orchestrator_status_str().to_string();
+        let changed = {
+            let mut st = self.ws_state.lock().unwrap();
+            if st.orchestrator_status != status {
+                st.orchestrator_status = status;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.broadcast_agents();
+        }
+    }
+
+    /// Return the orchestrator status as a wire-protocol string.
+    fn orchestrator_status_str(&self) -> &'static str {
+        use dispatch_core::orchestrator;
+        match &self.orchestrator {
+            Some(o) if o.is_alive() => match o.state {
+                orchestrator::OrchestratorState::Idle => "idle",
+                orchestrator::OrchestratorState::Responding => "thinking",
+                orchestrator::OrchestratorState::Dead => "dead",
+            },
+            Some(_) => "dead",
+            None if self.orch_error.is_some() => "failed",
+            None => "starting",
+        }
     }
 
     /// Total pages: determined by the configured slot count (callsigns list length).
@@ -628,7 +662,6 @@ impl App {
                     phase: strike_team::StrikeTeamPhase::Planning,
                     tasks: Vec::new(),
                     task_file_path,
-                    planner_callsign: Some(planner_callsign.clone()),
                 });
 
                 self.push_orch(OrchestratorEventKind::Dispatched {
@@ -650,10 +683,10 @@ impl App {
                 }
                 self.broadcast_agents();
 
-                tools::ToolResult::StrikeTeamStarted {
+                tools::ToolResult::StrikeTeamAcknowledged {
                     name: st_name,
-                    planner_slot: (slot_idx + 1) as u32,
-                    planner_callsign,
+                    spec_file: spec_file.to_string(),
+                    repo: target_repo,
                 }
             }
 
@@ -729,10 +762,21 @@ impl App {
         match phase {
             strike_team::StrikeTeamPhase::Planning => {
                 // Check if the planner agent is idle (finished planning).
-                let planner_cs = match &self.strike_team {
-                    Some(st) => st.planner_callsign.clone(),
+                // Find the planner by scanning slots for the strike-team-planner task.
+                let st_name = match &self.strike_team {
+                    Some(st) => st.name.clone(),
                     None => return,
                 };
+                let planner_task_id = format!("strike-team-planner:{}", st_name);
+                let planner_cs: Option<String> = self.slots.iter().find_map(|s| {
+                    s.as_ref().and_then(|slot| {
+                        if slot.task_id.as_deref() == Some(planner_task_id.as_str()) {
+                            Some(slot.display_name().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                });
                 if let Some(cs) = &planner_cs {
                     let planner_idle = self.slots.iter().any(|s| {
                         s.as_ref().map_or(false, |slot| {
@@ -760,7 +804,6 @@ impl App {
                                     self.push_ticker(format!("STRIKE TEAM: {} aborted — no tasks found", name));
                                 } else {
                                     st.phase = strike_team::StrikeTeamPhase::Executing;
-                                    st.planner_callsign = None;
                                     let name = st.name.clone();
                                     self.push_ticker(format!("STRIKE TEAM: plan ready, {} tasks", task_count));
                                     self.push_chat("System", &format!("Strike Team '{}': plan ready with {} tasks.", name, task_count));
@@ -834,10 +877,20 @@ impl App {
         }
 
         // git pull --ff-only in repo root to pick up prior merges.
-        let _ = Command::new("git")
+        match Command::new("git")
             .args(["pull", "--ff-only"])
             .current_dir(&repo)
-            .output();
+            .output()
+        {
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                self.push_ticker(format!("STRIKE TEAM: git pull failed — {}", stderr.trim()));
+            }
+            Err(e) => {
+                self.push_ticker(format!("STRIKE TEAM: git pull error — {}", e));
+            }
+            _ => {}
+        }
 
         for task_id in &ready_ids {
             // Find an available slot.
@@ -884,7 +937,7 @@ impl App {
                 let st = self.strike_team.as_mut().unwrap();
                 strike_team::assign_task(&mut st.tasks, task_id, &actual_callsign);
                 // Write updated task file.
-                let contents = strike_team::write_task_file(st);
+                let contents = strike_team::write_task_file(&st.tasks);
                 let _ = std::fs::write(&task_file_path, &contents);
             }
 
@@ -926,7 +979,7 @@ impl App {
 
         // Mark task done.
         strike_team::complete_task(&mut st.tasks, &task_id);
-        let contents = strike_team::write_task_file(st);
+        let contents = strike_team::write_task_file(&st.tasks);
         let _ = std::fs::write(&st.task_file_path, &contents);
 
         let name = st.name.clone();
@@ -972,7 +1025,7 @@ impl App {
 
         // Mark task failed.
         strike_team::fail_task(&mut st.tasks, &task_id);
-        let contents = strike_team::write_task_file(st);
+        let contents = strike_team::write_task_file(&st.tasks);
         let _ = std::fs::write(&st.task_file_path, &contents);
 
         let name = st.name.clone();
