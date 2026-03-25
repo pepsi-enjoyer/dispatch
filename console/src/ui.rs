@@ -350,8 +350,10 @@ fn render_pane(
 pub fn render_panes(f: &mut Frame, area: Rect, app: &App) {
     let page_start = app.current_page * SLOTS_PER_PAGE;
 
-    // Pre-compute vt lines for each visible slot (hold locks briefly, then release).
-    // dispatch-ct2.4: set scrollback offset before reading, then restore to 0.
+    // Pre-compute vt lines for each visible slot.
+    // Clone each screen under a brief lock, then convert to Lines outside the lock.
+    // This reduces mutex contention with the PTY reader thread which also locks
+    // the parser to call process().
     let mut page_lines: [Option<Vec<Line<'static>>>; SLOTS_PER_PAGE] =
         [None, None, None, None];
     let mut page_scrolled: [bool; SLOTS_PER_PAGE] = [false; SLOTS_PER_PAGE];
@@ -359,11 +361,17 @@ pub fn render_panes(f: &mut Frame, area: Rect, app: &App) {
         let g = page_start + local;
         if g < app.slots.len() {
             if let Some(slot) = &app.slots[g] {
-                let mut parser = slot.screen.lock().unwrap();
-                parser.set_scrollback(slot.scroll_offset);
-                page_lines[local] = Some(screen_to_lines(parser.screen()));
+                // Hold lock briefly: set scrollback offset, clone screen, reset.
+                let screen_clone = {
+                    let mut parser = slot.screen.lock().unwrap();
+                    parser.set_scrollback(slot.scroll_offset);
+                    let cloned = parser.screen().clone();
+                    parser.set_scrollback(0);
+                    cloned
+                };
+                // Convert cloned screen to ratatui Lines without holding the lock.
+                page_lines[local] = Some(screen_to_lines(&screen_clone));
                 page_scrolled[local] = slot.scroll_offset > 0;
-                parser.set_scrollback(0);
             }
         }
     }
