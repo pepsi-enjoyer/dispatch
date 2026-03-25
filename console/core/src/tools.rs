@@ -57,9 +57,9 @@ pub enum ToolCall {
         /// Text to send to the agent's PTY.
         text: String,
     },
-    /// Launch a Strike Team from a spec file.
+    /// Launch a Strike Team from a document.
     StrikeTeam {
-        /// Path to the spec/feature markdown file, relative to repo root.
+        /// Path to the document (spec, review, design doc, etc.), relative to repo root.
         spec_file: String,
         /// Short name for this operation. Defaults to spec filename without extension.
         #[serde(default)]
@@ -232,13 +232,13 @@ pub fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "strike_team",
-            "description": "Launch a Strike Team: break a spec into tasks with dependencies, then dispatch agents in parallel waves until all tasks are complete.",
+            "description": "Launch a Strike Team: read any document (spec, review, design doc, etc.), break it into tasks with dependencies, then dispatch agents in parallel waves until all tasks are complete.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "spec_file": {
                         "type": "string",
-                        "description": "Path to the spec/feature markdown file, relative to repo root."
+                        "description": "Path to the document (spec, review, design doc, TODO list, etc.), relative to repo root."
                     },
                     "name": {
                         "type": "string",

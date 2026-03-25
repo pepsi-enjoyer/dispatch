@@ -612,9 +612,13 @@ impl App {
                 // Build planner prompt (no worktree — works in repo root).
                 let planner_prompt = format!(
                     "You are a task planner for the Dispatch Strike Team system. Your ONLY job is to \
-                     read a spec file and create a task breakdown.\n\n\
-                     1. Read the spec file at: {spec_file}\n\
-                     2. Create a task file at: .dispatch/tasks-{st_name}.md\n\n\
+                     read a document and break it down into actionable tasks.\n\n\
+                     The document may be anything: a feature spec, a bug report, a performance review, \
+                     a design doc, a list of TODOs, or any other document with actionable content. \
+                     Your job is to parse whatever is in the document and extract concrete tasks from it.\n\n\
+                     1. Read the document at: {spec_file}\n\
+                     2. Analyze its contents and identify all actionable items\n\
+                     3. Create a task file at: .dispatch/tasks-{st_name}.md\n\n\
                      Use this EXACT format:\n\n\
                      # Strike Team: {st_name}\n\
                      spec: {spec_file}\n\n\
@@ -628,19 +632,16 @@ impl App {
                      dependencies: T1\n\
                      prompt: <first line of prompt>\n\
                      \x20\x20<more detail on indented continuation lines>\n\n\
-                     EXAMPLE of a good prompt:\n\n\
-                     prompt: Create a User struct in src/models/user.rs.\n\
-                     \x20\x20Fields: id (Uuid), email (String), name (String), created_at (DateTime).\n\
-                     \x20\x20Derive serde Serialize/Deserialize and Debug.\n\
-                     \x20\x20Add a User::new(email, name) constructor that generates the id and timestamp.\n\
-                     \x20\x20Add unit tests for User::new in the same file.\n\n\
                      RULES:\n\
+                     - Read the document carefully and extract every actionable item as a task.\n\
+                     - Each task prompt must be self-contained: include all relevant context, file paths, \
+                     code snippets, and acceptance criteria from the source document so the agent can \
+                     complete the task without reading the original document.\n\
                      - Each task must be completable by a single agent in one session.\n\
                      - Maximize parallelism: only add dependencies when truly required.\n\
-                     - Write detailed, multi-line prompts with specific file paths, function signatures, and acceptance criteria.\n\
-                     - Use 2-space indented continuation lines for multi-line prompts.\n\
+                     - Write detailed, multi-line prompts using 2-space indented continuation lines.\n\
                      - Sequential IDs: T1, T2, T3, etc.\n\
-                     - Aim for 3-15 tasks.\n\
+                     - Aim for 3-15 tasks. Group small related items into a single task if needed.\n\
                      - Do NOT create a git worktree. Work directly in the repo root.\n\
                      - After creating the file, report the task count via your status message file, then stop."
                 );
