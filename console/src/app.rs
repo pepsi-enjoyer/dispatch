@@ -708,7 +708,7 @@ impl App {
                     slot.idle = false;
                 }
 
-                let planner_callsign = self.slots[slot_idx].as_ref().unwrap().display_name().to_string();
+                let phase_agent_callsign = self.slots[slot_idx].as_ref().unwrap().display_name().to_string();
 
                 // Initialize strike team state.
                 let task_file_path = format!("{}/.dispatch/tasks-{}.md", target_repo, st_name);
@@ -719,11 +719,11 @@ impl App {
                     phase: strike_team::StrikeTeamPhase::Planning,
                     tasks: Vec::new(),
                     task_file_path,
-                    planner_callsign: Some(planner_callsign.clone()),
+                    phase_agent_callsign: Some(phase_agent_callsign.clone()),
                 });
 
                 self.push_orch(OrchestratorEventKind::Dispatched {
-                    agent: planner_callsign.clone(), slot: slot_idx + 1, tool: effective_tool.clone(),
+                    agent: phase_agent_callsign.clone(), slot: slot_idx + 1, tool: effective_tool.clone(),
                 });
                 self.push_ticker(format!("STRIKE TEAM: planning {}...", st_name));
                 self.push_chat("System", &format!("Strike Team '{}': planner dispatched to slot {}.", st_name, slot_idx + 1));
@@ -732,7 +732,7 @@ impl App {
                 {
                     let mut st = self.ws_state.lock().unwrap();
                     st.slots[slot_idx] = Some(ws_server::AgentSlot {
-                        callsign: planner_callsign.clone(),
+                        callsign: phase_agent_callsign.clone(),
                         tool: effective_tool,
                         status: ws_server::AgentStatus::Busy,
                         task: None,
@@ -820,11 +820,11 @@ impl App {
         match phase {
             strike_team::StrikeTeamPhase::Planning => {
                 // Check if the planner agent is idle or exited.
-                // Use the persisted planner_callsign rather than scanning
+                // Use the persisted phase_agent_callsign rather than scanning
                 // slots by task_id, which races against the main loop
                 // clearing task_id before this tick runs.
                 let cs = match &self.strike_team {
-                    Some(st) => match &st.planner_callsign {
+                    Some(st) => match &st.phase_agent_callsign {
                         Some(cs) => cs.clone(),
                         None => return,
                     },
@@ -847,7 +847,7 @@ impl App {
                 if planner_idle || planner_gone {
                     // Parse the task file and transition to Executing.
                     let st = self.strike_team.as_mut().unwrap();
-                    st.planner_callsign = None; // No longer needed.
+                    st.phase_agent_callsign = None; // No longer needed.
                     let task_file = &st.task_file_path;
                     match std::fs::read_to_string(task_file) {
                         Ok(contents) => {
@@ -895,6 +895,50 @@ impl App {
             strike_team::StrikeTeamPhase::Executing => {
                 self.strike_team_dispatch_ready();
             }
+            strike_team::StrikeTeamPhase::Verifying => {
+                // Detect verifier idle/exit using the same pattern as Planning.
+                let cs = match &self.strike_team {
+                    Some(st) => match &st.phase_agent_callsign {
+                        Some(cs) => cs.clone(),
+                        None => return,
+                    },
+                    None => return,
+                };
+
+                let verifier_idle = self.slots.iter().any(|s| {
+                    s.as_ref().map_or(false, |slot| {
+                        slot.display_name().eq_ignore_ascii_case(&cs) && slot.task_id.is_none()
+                    })
+                });
+                let verifier_gone = !self.slots.iter().any(|s| {
+                    s.as_ref().map_or(false, |slot| {
+                        slot.display_name().eq_ignore_ascii_case(&cs)
+                    })
+                });
+
+                if verifier_idle || verifier_gone {
+                    // Terminate the verifier to free the slot.
+                    if verifier_idle {
+                        if let Some(idx) = self.slots.iter().position(|s| {
+                            s.as_ref().map_or(false, |slot| {
+                                slot.display_name().eq_ignore_ascii_case(&cs)
+                            })
+                        }) {
+                            let callsign = self.slots[idx].as_ref().unwrap().display_name().to_string();
+                            crate::pty::terminate_slot(&mut self.slots[idx]);
+                            self.push_orch(OrchestratorEventKind::Terminated {
+                                agent: callsign, slot: idx + 1,
+                            });
+                            {
+                                let mut wst = self.ws_state.lock().unwrap();
+                                wst.slots[idx] = None;
+                            }
+                            self.broadcast_agents();
+                        }
+                    }
+                    self.strike_team_complete();
+                }
+            }
             strike_team::StrikeTeamPhase::Complete | strike_team::StrikeTeamPhase::Aborted => {
                 // Nothing to do — terminal states.
             }
@@ -920,12 +964,9 @@ impl App {
             if strike_team::is_complete(&st.tasks) {
                 let summary = strike_team::summary(&st.tasks);
                 let name = st.name.clone();
-                self.strike_team.as_mut().unwrap().phase = strike_team::StrikeTeamPhase::Complete;
-                self.push_ticker(format!("STRIKE TEAM: complete ({})", summary));
-                self.push_chat("System", &format!("Strike Team '{}': complete ({}).", name, summary));
-                if let Some(orch) = &mut self.orchestrator {
-                    orch.send_message(&format!("[EVENT] STRIKE_TEAM_COMPLETE name={} result={}", name, summary));
-                }
+                self.push_ticker(format!("STRIKE TEAM: tasks complete ({}), dispatching verifier", summary));
+                self.push_chat("System", &format!("Strike Team '{}': tasks complete ({}), verifying.", name, summary));
+                self.strike_team_dispatch_verifier();
             }
             return;
         }
@@ -1061,6 +1102,109 @@ impl App {
         }
     }
 
+    /// Dispatch a verifier agent after all tasks are done. Transitions to Verifying.
+    fn strike_team_dispatch_verifier(&mut self) {
+        let (repo, source_file, task_file_path, name) = {
+            let st = match &self.strike_team {
+                Some(st) => st,
+                None => return,
+            };
+            (st.repo.clone(), st.source_file.clone(), st.task_file_path.clone(), st.name.clone())
+        };
+
+        let slot_idx = match self.slots.iter().position(|s| s.is_none()) {
+            Some(i) => i,
+            None => {
+                // No slot available -- tick will retry next frame.
+                return;
+            }
+        };
+
+        let callsign = self.next_callsign()
+            .unwrap_or_else(|| "Verifier".to_string());
+        let effective_tool = self.default_tool.clone();
+        let cmd = self.tool_cmd(&effective_tool).to_string();
+
+        let verifier_prompt = format!(
+            "Your callsign is {}. You are a verification agent for the Dispatch Strike Team system. \
+             All implementation tasks are complete. Your job is to verify the implementations against \
+             the original document.\n\n\
+             1. Read the source document at: {}\n\
+             2. Read the task file at: {}\n\
+             3. For each task, check that the implementation matches what was specified.\n\
+             4. Look for integration issues between tasks -- things that individual agents may have \
+                missed because they worked in isolation.\n\
+             5. Fix any issues you find. If a fix requires code changes, make them directly.\n\
+             6. Report your findings via your status message file, then stop.",
+            callsign, source_file, task_file_path
+        );
+
+        match dispatch_slot(
+            slot_idx, &effective_tool, &cmd, self.pane_rows, self.pane_cols,
+            None, self.scrollback_lines,
+            repo_name_from_path(&repo), &repo,
+            Some(&verifier_prompt),
+            &callsign,
+            &self.merge_strategy,
+        ) {
+            Some(slot) => { self.slots[slot_idx] = Some(slot); }
+            None => return,
+        }
+
+        {
+            let slot = self.slots[slot_idx].as_mut().unwrap();
+            slot.task_id = Some(format!("strike-team-verifier:{}", name));
+            *slot.last_output_at.lock().unwrap() = Instant::now();
+            slot.idle = false;
+        }
+
+        let actual_callsign = self.slots[slot_idx].as_ref().unwrap().display_name().to_string();
+
+        {
+            let st = self.strike_team.as_mut().unwrap();
+            st.phase = strike_team::StrikeTeamPhase::Verifying;
+            st.phase_agent_callsign = Some(actual_callsign.clone());
+        }
+
+        self.push_orch(OrchestratorEventKind::Dispatched {
+            agent: actual_callsign.clone(), slot: slot_idx + 1, tool: effective_tool.clone(),
+        });
+        self.push_ticker(format!("STRIKE TEAM: verifier -> {}", actual_callsign));
+        self.push_chat("System", &format!("Strike Team '{}': verifier dispatched to slot {}.", name, slot_idx + 1));
+
+        // Sync ws_state.
+        {
+            let mut wst = self.ws_state.lock().unwrap();
+            wst.slots[slot_idx] = Some(ws_server::AgentSlot {
+                callsign: actual_callsign,
+                tool: effective_tool,
+                status: ws_server::AgentStatus::Busy,
+                task: None,
+                repo: Some(repo_name_from_path(&repo).to_string()),
+            });
+        }
+        self.broadcast_agents();
+    }
+
+    /// Called when the verifier agent finishes. Transitions to Complete.
+    fn strike_team_complete(&mut self) {
+        let st = match &mut self.strike_team {
+            Some(st) if st.phase == strike_team::StrikeTeamPhase::Verifying => st,
+            _ => return,
+        };
+
+        let summary = strike_team::summary(&st.tasks);
+        let name = st.name.clone();
+        st.phase = strike_team::StrikeTeamPhase::Complete;
+        st.phase_agent_callsign = None;
+
+        self.push_ticker(format!("STRIKE TEAM: complete ({})", summary));
+        self.push_chat("System", &format!("Strike Team '{}': complete ({}).", name, summary));
+        if let Some(orch) = &mut self.orchestrator {
+            orch.send_message(&format!("[EVENT] STRIKE_TEAM_COMPLETE name={} result={}", name, summary));
+        }
+    }
+
     /// Abort the active strike team. Transitions to Aborted phase so no new
     /// tasks are dispatched. Active agents continue but nothing new is started.
     pub fn abort_strike_team(&mut self) {
@@ -1077,32 +1221,51 @@ impl App {
     }
 
     /// Called when an agent process exits unexpectedly. If the agent was working
-    /// on a strike team task, mark the task as failed.
+    /// on a strike team task, mark the task as failed. If the verifier exits,
+    /// complete the strike team anyway (verification is best-effort).
     pub fn strike_team_on_agent_exit(&mut self, slot_idx: usize) {
         let callsign = match &self.slots[slot_idx] {
             Some(s) => s.display_name().to_string(),
             None => return,
         };
 
-        let st = match &mut self.strike_team {
-            Some(st) if st.phase == strike_team::StrikeTeamPhase::Executing => st,
-            _ => return,
-        };
-
-        // Find the task assigned to this callsign.
-        let task_id = match strike_team::task_for_agent(&st.tasks, &callsign) {
-            Some(t) => t.id.clone(),
+        let phase = match &self.strike_team {
+            Some(st) => st.phase.clone(),
             None => return,
         };
 
-        // Mark task failed.
-        strike_team::fail_task(&mut st.tasks, &task_id);
-        let contents = strike_team::write_task_file(&st.tasks);
-        let _ = std::fs::write(&st.task_file_path, &contents);
+        match phase {
+            strike_team::StrikeTeamPhase::Verifying => {
+                // Verifier exited -- complete anyway.
+                let is_verifier = self.strike_team.as_ref()
+                    .and_then(|st| st.phase_agent_callsign.as_deref())
+                    .map_or(false, |cs| cs.eq_ignore_ascii_case(&callsign));
+                if is_verifier {
+                    let name = self.strike_team.as_ref().unwrap().name.clone();
+                    self.push_ticker(format!("STRIKE TEAM: verifier exited ({})", callsign));
+                    self.push_chat("System", &format!("Strike Team '{}': verifier exited, completing.", name));
+                    self.strike_team_complete();
+                }
+            }
+            strike_team::StrikeTeamPhase::Executing => {
+                let st = self.strike_team.as_mut().unwrap();
+                // Find the task assigned to this callsign.
+                let task_id = match strike_team::task_for_agent(&st.tasks, &callsign) {
+                    Some(t) => t.id.clone(),
+                    None => return,
+                };
 
-        let name = st.name.clone();
-        self.push_ticker(format!("STRIKE TEAM: {} failed ({})", task_id, callsign));
-        self.push_chat("System", &format!("Strike Team '{}': {} failed ({}).", name, task_id, callsign));
+                // Mark task failed.
+                strike_team::fail_task(&mut st.tasks, &task_id);
+                let contents = strike_team::write_task_file(&st.tasks);
+                let _ = std::fs::write(&st.task_file_path, &contents);
+
+                let name = st.name.clone();
+                self.push_ticker(format!("STRIKE TEAM: {} failed ({})", task_id, callsign));
+                self.push_chat("System", &format!("Strike Team '{}': {} failed ({}).", name, task_id, callsign));
+            }
+            _ => {}
+        }
     }
 
 }

@@ -260,8 +260,8 @@ A coordinated multi-agent execution mode that takes any document (spec, design d
 ### Lifecycle
 
 ```
-Idle --> Planning --> Executing --> Complete
-                 \-> Aborted (planner error)
+Idle --> Planning --> Executing --> Verifying --> Complete
+                 \-> Aborted (planner error / user abort)
 ```
 
 ### How It Works
@@ -273,6 +273,8 @@ Idle --> Planning --> Executing --> Complete
 5. When an agent finishes, it merges to main and is terminated to free the slot.
 6. The console pulls the latest main, checks for newly unblocked tasks, and dispatches the next wave.
 7. Repeats until all tasks are `done` or `failed`.
+8. A **verifier agent** is dispatched to check all implementations against the source document and fix any issues.
+9. When the verifier finishes, the strike team transitions to Complete.
 
 ### Task File Format
 
@@ -336,7 +338,9 @@ Runs inside the existing 16ms main loop tick -- no new threads or async.
    - Terminate the agent (free the slot for next wave).
    - Re-run from step 1.
 6. When an agent process exits unexpectedly: mark task `failed`, continue.
-7. When all tasks are `done` or `failed`: transition to Complete and notify the orchestrator via `[EVENT] STRIKE_TEAM_COMPLETE name=<name> result=<done>/<total>`.
+7. When all tasks are `done` or `failed`: transition to Verifying phase and dispatch a verifier agent.
+8. The verifier reads the source document and task file, checks implementations, fixes issues, then stops.
+9. When the verifier goes idle or exits: transition to Complete and notify the orchestrator via `[EVENT] STRIKE_TEAM_COMPLETE name=<name> result=<done>/<total>`.
 
 Each task agent follows the normal dispatch workflow: creates a worktree from latest main, works on its task, merges to main, pushes, cleans up, and goes idle. On idle detection, the console terminates the agent to free the slot for the next wave.
 
@@ -349,6 +353,7 @@ Each task agent follows the normal dispatch workflow: creates a worktree from la
   - `STRIKE TEAM: plan ready, 7 tasks`
   - `STRIKE TEAM: T3 -> Alpha`
   - `STRIKE TEAM: T3 done (Alpha)`
+  - `STRIKE TEAM: verifier -> Bravo`
   - `STRIKE TEAM: complete (7/7)`
 
 ### Edge Cases

@@ -664,10 +664,10 @@ fn parse_action_json(json_str: &str) -> Result<tools::ToolCall, serde_json::Erro
             Ok(tools::ToolCall::MessageAgent { agent, text })
         }
         "strike_team" => {
-            let spec_file = v.get("source_file").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let source_file = v.get("source_file").and_then(|s| s.as_str()).unwrap_or("").to_string();
             let name = v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string());
             let repo = v.get("repo").and_then(|r| r.as_str()).unwrap_or("").to_string();
-            Ok(tools::ToolCall::StrikeTeam { spec_file, name, repo })
+            Ok(tools::ToolCall::StrikeTeam { source_file, name, repo })
         }
         _ => {
             use serde::de::Error;
@@ -713,8 +713,8 @@ mod tests {
         let calls = parse_all_tool_calls(text);
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            tools::ToolCall::StrikeTeam { spec_file, name, repo } => {
-                assert_eq!(spec_file, "docs/PERFORMANCE_REVIEW.md");
+            tools::ToolCall::StrikeTeam { source_file, name, repo } => {
+                assert_eq!(source_file, "docs/PERFORMANCE_REVIEW.md");
                 assert!(name.is_none());
                 assert_eq!(repo, "dispatch");
             }
@@ -728,8 +728,8 @@ mod tests {
         let calls = parse_all_tool_calls(text);
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            tools::ToolCall::StrikeTeam { spec_file, name, repo } => {
-                assert_eq!(spec_file, "docs/spec.md");
+            tools::ToolCall::StrikeTeam { source_file, name, repo } => {
+                assert_eq!(source_file, "docs/spec.md");
                 assert_eq!(name.as_deref(), Some("perf"));
                 assert_eq!(repo, "myrepo");
             }
