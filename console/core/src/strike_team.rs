@@ -67,6 +67,11 @@ pub struct StrikeTeamState {
     pub phase: StrikeTeamPhase,
     pub tasks: Vec<Task>,
     pub task_file_path: String,
+    /// Callsign of the planner agent during the Planning phase.
+    /// Persisted so tick_strike_team() can detect planner idle/exit
+    /// without scanning slots by task_id (which races against the
+    /// main loop clearing task_id before the tick runs).
+    pub planner_callsign: Option<String>,
 }
 
 // ── Parsing ──────────────────────────────────────────────────────────────────
