@@ -116,6 +116,20 @@ class RadioSettings(context: Context) {
         return true
     }
 
+    /**
+     * Return the name of the next profile after [activeProfile] in the sorted
+     * list, wrapping around to the first. Returns null if fewer than 2 profiles
+     * exist (cycling makes no sense with 0 or 1).
+     */
+    fun nextProfileName(): String? {
+        val profiles = listProfiles()
+        if (profiles.size < 2) return null
+        val current = activeProfile
+        val idx = profiles.indexOfFirst { it.name == current }
+        val next = if (idx < 0) 0 else (idx + 1) % profiles.size
+        return profiles[next].name
+    }
+
     private fun writeProfiles(profiles: List<ConnectionProfile>) {
         val arr = JSONArray()
         for (p in profiles) {
