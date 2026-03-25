@@ -131,17 +131,23 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &mut App) {
         None if app.orch_error.is_some() => "  ORCH: FAILED",
         None => "  ORCH: STARTING",
     };
-    // Strike team progress indicator when executing or verifying.
-    let strike_indicator = match &app.strike_team {
-        Some(st) if st.phase == StrikeTeamPhase::Executing => {
-            let progress = strike_team::summary(&st.tasks);
-            format!("  STRIKE TEAM {}", progress)
+    // Strike team progress indicator(s) when executing or verifying.
+    let strike_indicator = {
+        let mut parts = Vec::new();
+        for st in &app.strike_teams {
+            match st.phase {
+                StrikeTeamPhase::Executing => {
+                    let progress = strike_team::summary(&st.tasks);
+                    parts.push(format!("ST:{} {}", st.name, progress));
+                }
+                StrikeTeamPhase::Verifying => {
+                    let progress = strike_team::summary(&st.tasks);
+                    parts.push(format!("ST:{} {} VERIFYING", st.name, progress));
+                }
+                _ => {}
+            }
         }
-        Some(st) if st.phase == StrikeTeamPhase::Verifying => {
-            let progress = strike_team::summary(&st.tasks);
-            format!("  STRIKE TEAM {} VERIFYING", progress)
-        }
-        _ => String::new(),
+        if parts.is_empty() { String::new() } else { format!("  {}", parts.join(" | ")) }
     };
     let right = format!(
         "PSK: {}  AGENTS: {}/{}{}{}{}  PAGE {}/{}  {}",
@@ -228,9 +234,9 @@ fn pane_info_strip(global_idx: usize, local_idx: usize, app: &App) -> Text<'stat
             };
             // Strike team task label: show task ID next to callsign when assigned.
             let strike_task_label = app
-                .strike_team
-                .as_ref()
-                .and_then(|st| strike_team::task_for_agent(&st.tasks, &agent.callsign))
+                .strike_teams
+                .iter()
+                .find_map(|st| strike_team::task_for_agent(&st.tasks, &agent.callsign))
                 .map(|t| format!(" [{}]", t.id))
                 .unwrap_or_default();
             // Activity indicator: shows WORK or IDLE based on PTY output.
