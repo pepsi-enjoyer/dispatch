@@ -651,9 +651,9 @@ impl App {
                         .unwrap_or(source_file)
                 }).to_string();
 
-                // Build planner prompt from docs/STRIKE_TEAM_PLANNER.md template.
+                // Build planner prompt from docs/PLANNER.md template.
                 let planner_prompt = read_prompt_template(
-                    &target_repo, "STRIKE_TEAM_PLANNER.md",
+                    &target_repo, "PLANNER.md",
                     &[("{source_file}", &source_file), ("{name}", &st_name)],
                 );
 
@@ -1136,7 +1136,7 @@ impl App {
             "Your callsign is {}. {}",
             callsign,
             read_prompt_template(
-                &repo, "STRIKE_TEAM_VERIFIER.md",
+                &repo, "VERIFIER.md",
                 &[("{source_file}", &source_file), ("{task_file_path}", &task_file_path)],
             )
         );
