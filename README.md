@@ -126,7 +126,7 @@ Open the `radio/` directory in Android Studio, sync Gradle, and deploy to your p
 
 - **LLM orchestrator** -- a persistent headless Claude process acts as the central coordinator. Voice transcripts go directly to it; it responds with tool calls. No command parsing.
 - **Multi-agent support** -- supports Claude Code and GitHub Copilot CLI as AI agents. The orchestrator can dispatch either tool per task, configurable via `[tools]` in `config.toml`. Copilot runs in YOLO mode for fully autonomous operation.
-- **Strike teams** -- coordinated multi-agent execution mode. Provide any document (spec, design doc, performance review, TODO list) and a planner agent breaks it into tasks with dependencies, then agents are dispatched in parallel waves -- maximizing throughput while respecting task ordering. See [`docs/FEAT-STRIKE-TEAM.md`](docs/FEAT-STRIKE-TEAM.md) for details.
+- **Strike teams** -- coordinated multi-agent execution mode. Provide any document (spec, design doc, performance review, TODO list) and a planner agent breaks it into tasks with dependencies, then agents are dispatched in parallel waves -- maximizing throughput while respecting task ordering. See [`docs/features/STRIKE_TEAM.md`](docs/features/STRIKE_TEAM.md) for details.
 - **Configurable workflow** -- the `[workflow]` section in `config.toml` controls how agents finalize work. In `"pr"` mode (default), agents push their branch and create a pull request. In `"merge"` mode, agents merge directly to main and push.
 - **Embedded terminals** -- each pane is a real PTY with full color, interactive TUI support, tab completion, and signal handling.
 - **Git worktree isolation** -- each agent works on its own branch in its own worktree. Agents run in parallel without conflicts.
@@ -166,7 +166,7 @@ dispatch/
     ARCHITECTURE.md           # Architecture overview
     ORCHESTRATOR.md           # Orchestrator behavior and tool reference
     AGENTS.md                 # Template injected into agent prompts
-    FEAT-STRIKE-TEAM.md       # Strike team feature design
+    features/STRIKE_TEAM.md   # Strike team feature design
     CHANGELOG.md              # Version history
 ```
 

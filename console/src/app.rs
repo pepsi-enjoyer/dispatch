@@ -1016,7 +1016,7 @@ impl App {
             let effective_tool = self.default_tool.clone();
             let cmd = self.tool_cmd(&effective_tool).to_string();
             let task_num = task_id.strip_prefix('T').unwrap_or(task_id);
-            let commit_prefix = format!("{} #{}", st_name, task_num);
+            let commit_prefix = format!("{}-t{}", st_name, task_num);
             let full_prompt = format!(
                 "Your callsign is {}. COMMIT PREFIX: you MUST prefix ALL git commit messages with \
                  '{}: ' (example: '{}: implement feature X'). \

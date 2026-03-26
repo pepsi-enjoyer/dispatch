@@ -61,7 +61,7 @@ The console maintains a shared memory file at `.dispatch/MEMORY.md` in each targ
 
 **Reading**: When an agent is dispatched, the console reads `.dispatch/MEMORY.md` and appends its contents to the agent's system prompt. Agents benefit from prior learnings without any extra steps.
 
-**Writing**: Agents are instructed (via `docs/AGENTS.md`) to append valuable learnings to the memory file after completing their work. Only high-value knowledge is written -- not routine observations.
+**Writing**: Agents are instructed (via `docs/AGENTS.md`) to append useful learnings to the memory file after completing their work -- build commands, architectural decisions, gotchas, patterns, and environment quirks.
 
 **Lifecycle**: The memory file is created with an empty template on first agent dispatch. It is never automatically pruned. The file lives in `.dispatch/` (gitignored) so it persists locally across sessions but is not committed to the repository.
 

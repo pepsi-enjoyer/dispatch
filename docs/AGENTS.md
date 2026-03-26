@@ -82,8 +82,8 @@ Other commands: `scp`/`ssh` -- use `-o BatchMode=yes`; `apt-get` -- use `-y`; `b
 
 A shared memory file at `.dispatch/MEMORY.md` (repo root) persists knowledge across agents. Its current contents are included in "Shared Memory" above (if any prior agents have written to it).
 
-**When to update**: After merging, if you learned something that would save future agents significant time. Add concise bullet points (1-2 lines each) under the appropriate section (`Build & Test`, `Gotchas`, or `Notes`). Do not rewrite existing content -- only append.
+**When to update**: After merging, if you learned something useful for future agents. Add concise bullet points (1-2 lines each) under the appropriate section (`Build & Test`, `Gotchas`, or `Notes`). Do not rewrite existing content -- only append.
 
-Worth recording: non-obvious build/test commands, architectural gotchas, environment quirks, common mistakes.
+Worth recording: build/test commands, architectural decisions or gotchas, environment quirks, common mistakes, useful patterns you discovered.
 
 **When NOT to update**: Most tasks don't need one. Skip it if you didn't learn anything a future agent wouldn't already know from the code.
