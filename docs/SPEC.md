@@ -210,8 +210,8 @@ A single-line LED-style scrolling marquee between the header bar and the quad pa
 
 **Message sources:**
 
-- Agent events: `Alpha dispatched to myrepo`, `Bravo merged to main`
-- Merge results: `Alpha merged to main` or `Alpha merge conflict, needs manual review`
+- Agent events: `Alpha dispatched to myrepo`, `Bravo merged to main` (or `PR CREATED: Bravo` when merge_strategy is "pr")
+- Merge/PR results: `Alpha merged to main` or `PR CREATED: Alpha` (depends on merge_strategy) or `Alpha merge conflict, needs manual review`
 - Errors: `All agent slots full`
 
 **Rendering:** fixed-width viewport, text offset decremented each frame tick (e.g. every 50ms). Once a message scrolls fully off-screen, it is discarded and the next queued message begins. If multiple messages queue up during a burst, they scroll sequentially with a small gap between them.
@@ -220,7 +220,7 @@ A single-line LED-style scrolling marquee between the header bar and the quad pa
 
 The console displays agent state across multiple areas:
 
-- **Header bar**: active agent count, current page indicator, clock.
+- **Header bar**: initialization path, active agent count, current page indicator, clock.
 - **Ticker**: real-time event stream (dispatch, merges, errors).
 - **Pane info strip**: each pane shows its callsign, tool, and status.
 - **Orchestrator view** (`o` key): toggles the main area between the 2x2 agent grid and a scrollable orchestrator event log showing voice transcripts, reasoning decisions, and tool calls in real time.
@@ -230,7 +230,8 @@ The console displays agent state across multiple areas:
 Pressing `o` in command mode replaces the 2x2 agent grid with a full-height scrollable log of orchestrator events. Each entry is timestamped and categorized:
 
 - **MIC**: incoming voice transcripts from the radio.
-- **MERGE**: branch merged to main.
+- **MERGE**: branch merged to main (when merge_strategy is "merge").
+- **PR**: pull request created (when merge_strategy is "pr").
 - **CONFLICT**: merge conflict detected.
 - **DISPATCH**: agent launched into a slot.
 - **TERM**: agent terminated.
@@ -571,7 +572,7 @@ The console displays four agent panes at a time in a 2x2 grid. With more than fo
 Pages are cycled with `Left` / `Right` arrow keys. The header shows the current page and total pages.
 
 ```
-┌─ DISPATCH ──────────────────────────────────────────────────────────┐
+┌─ DISPATCH -- myrepo ────────────────────────────────────────────────┐
 │ RADIO: ● CONNECTED   PSK: a7f3...  PAGE 1/2                14:32    │
 │ ◄◄ Alpha dispatched to myrepo... Bravo merged to main               │
 ├────────────────────────────────┬────────────────────────────────────┤
@@ -607,7 +608,7 @@ Pages are cycled with `Left` / `Right` arrow keys. The header shows the current 
 Page 2 of the same session:
 
 ```
-┌─ DISPATCH ──────────────────────────────────────────────────────────┐
+┌─ DISPATCH -- myrepo ────────────────────────────────────────────────┐
 │ RADIO: ● CONNECTED   PSK: a7f3...  PAGE 2/2                14:32    │
 │ ◄◄ Echo merged to main                                              │
 ├────────────────────────────────┬────────────────────────────────────┤
@@ -645,7 +646,7 @@ Page 2 of the same session:
 **Input mode** changes the footer and the targeted pane's border:
 
 ```
-┌─ DISPATCH ──────────────────────────────────────────────────────────┐
+┌─ DISPATCH -- myrepo ────────────────────────────────────────────────┐
 │ RADIO: ● CONNECTED   PSK: a7f3...  PAGE 1/2                14:32    │
 │ ◄◄ Alpha merged to main                                             │
 ├────────────────────────────────┬────────────────────────────────────┤
@@ -670,7 +671,7 @@ Bright green border on the active pane. Footer shows mode indicator.
 
 **Regions:**
 
-1. **Header bar** -- radio connection state, PSK (truncated), current page indicator, clock.
+1. **Header bar** -- title with initialization path (shortened if too long), radio connection state, PSK (truncated), current page indicator, clock.
 2. **Ticker** -- single-line LED-style scrolling marquee. Shows agent events, merge results, and errors. Text scrolls right-to-left. Blank when idle. See [Ticker](#ticker).
 3. **Quad pane** -- four slots from the current page. Targeted pane has `▸` marker and cyan border (command mode) or green border (input mode). Each pane has:
    - **Info strip**: callsign, tool type, status (busy/idle), dispatch time, and runtime.

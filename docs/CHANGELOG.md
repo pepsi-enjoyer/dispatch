@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.4.5
+
+### Fixed
+
+- Ticker now shows "PR CREATED" instead of "MERGED" when merge_strategy is set to "pr". The orchestrator log event type also changes from "MERGE" to "PR" accordingly.
+
+### Added
+
+- The console header title now displays the initialization path (e.g. "DISPATCH -- myrepo"). Long paths are shortened to the last directory component.
+
 ## v0.4.4
 
 ### Changed

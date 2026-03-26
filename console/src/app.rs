@@ -187,6 +187,14 @@ impl App {
             .unwrap_or("claude")
     }
 
+    /// The root directory where dispatch was initialized.
+    pub fn init_path(&self) -> &str {
+        match &self.workspace {
+            Workspace::SingleRepo { root } => root.as_str(),
+            Workspace::MultiRepo { parent, .. } => parent.as_str(),
+        }
+    }
+
     /// Whether we're in multi-repo mode (dispatch-sa1).
     pub fn is_multi_repo(&self) -> bool {
         matches!(self.workspace, Workspace::MultiRepo { .. })
@@ -584,9 +592,15 @@ impl App {
             // Agents merge their own branches; this tool acknowledges the
             // completion and generates the system merge notification.
             tools::ToolCall::Merge { agent } => {
-                self.push_orch(OrchestratorEventKind::Merged { id: agent.clone() });
-                self.push_ticker(format!("MERGED: {}", agent));
-                self.push_chat("System", &format!("{} has merged to remote.", agent));
+                if self.merge_strategy == "pr" {
+                    self.push_orch(OrchestratorEventKind::PrCreated { id: agent.clone() });
+                    self.push_ticker(format!("PR CREATED: {}", agent));
+                    self.push_chat("System", &format!("{} has created a PR.", agent));
+                } else {
+                    self.push_orch(OrchestratorEventKind::Merged { id: agent.clone() });
+                    self.push_ticker(format!("MERGED: {}", agent));
+                    self.push_chat("System", &format!("{} has merged to remote.", agent));
+                }
 
                 tools::ToolResult::Merged {
                     agent: agent.clone(),
