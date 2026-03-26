@@ -13,6 +13,26 @@ use ratatui::{
 use crate::types::*;
 use crate::util::{format_runtime, local_ip, repo_name_from_path, truncate};
 
+// ── Path shortening ───────────────────────────────────────────────────────
+
+/// Shorten a path for display. If within `max` chars, return as-is.
+/// Otherwise, show the last directory component (with ".../" prefix if truncated).
+fn shorten_path(path: &str, max: usize) -> String {
+    if path.chars().count() <= max {
+        return path.to_string();
+    }
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path);
+    let prefixed = format!(".../{}", name);
+    if prefixed.chars().count() <= max {
+        prefixed
+    } else {
+        truncate(name, max)
+    }
+}
+
 // ── VT100 screen conversion ────────────────────────────────────────────────
 
 fn vt100_color_to_ratatui(color: vt100::Color) -> Option<Color> {
@@ -184,9 +204,11 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &mut App) {
         Span::styled(right_padded, Style::default().fg(Color::White)),
     ]);
 
+    let init_dir = shorten_path(app.init_path(), 30);
+    let title = format!(" DISPATCH -- {} ", init_dir);
     let block = Block::default()
         .title(Span::styled(
-            " DISPATCH ",
+            title,
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -453,6 +475,11 @@ pub fn render_orchestrator(f: &mut Frame, area: Rect, app: &App) {
                 "MERGE",
                 Style::default().fg(Color::Green),
                 format!("{} merged to main", id),
+            ),
+            OrchestratorEventKind::PrCreated { id } => (
+                "PR",
+                Style::default().fg(Color::Green),
+                format!("{} created a PR", id),
             ),
             OrchestratorEventKind::MergeConflict { id } => (
                 "CONFLICT",

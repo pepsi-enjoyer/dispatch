@@ -45,6 +45,8 @@ pub enum OrchestratorEventKind {
     TaskComplete { id: String, agent: String },
     /// Worktree merged successfully.
     Merged { id: String },
+    /// Pull request created.
+    PrCreated { id: String },
     /// Merge conflict.
     MergeConflict { id: String },
     /// Agent dispatched into a slot.
