@@ -89,7 +89,7 @@ The orchestrator is a persistent `claude` process running in stream-json mode. I
 **Lifecycle:** Spawned at startup. Reads from stdout via a background thread. Messages queued if the orchestrator is mid-response (flushed on turn completion). If interrupted or crashed, respawned.
 
 **Communication protocol:**
-- Input: JSON lines on stdin (`{"type":"user","content":"[MIC] do something"}`)
+- Input: JSON lines on stdin (`{"type":"user","content":"[D-a8f3:MIC] do something"}`)
 - Output: JSON lines on stdout, parsed for text and tool call blocks
 - Tool calls: embedded as ` ```action {"action":"dispatch",...} ``` ` blocks in response text
 - Tool results: sent back as user messages wrapped in `<tool_result>` tags
@@ -124,7 +124,7 @@ Each slot holds one running agent process in a PTY. Slots are indexed 0-based in
 5. Starts a reader thread that feeds output to the vt100 parser and updates the idle-detection timestamp
 6. Returns `SlotState` to the main thread
 
-**Idle detection:** If an agent with a task ID produces no output for 10 seconds, it's marked idle and an `[EVENT] AGENT_IDLE` is sent to the orchestrator. New output transitions it back to working.
+**Idle detection:** If an agent with a task ID produces no output for 10 seconds, it's marked idle and an `[D-{nonce}:EVENT] AGENT_IDLE` is sent to the orchestrator. New output transitions it back to working.
 
 **Agent status messages:** Agents write messages to `.dispatch/messages/{callsign}` files (one line per message). The main loop polls these files for new content and forwards messages to the orchestrator and radio. This file-based approach eliminates the fragile terminal-output-parsing system that was prone to ANSI noise and ConPTY artifacts.
 

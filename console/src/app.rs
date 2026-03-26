@@ -545,7 +545,7 @@ impl App {
             tools::ToolCall::Terminate { agent } => {
                 // Gate: only allow terminate when the current orchestrator turn
                 // was triggered by authentic user voice/text input from the radio.
-                // Prevents the LLM from hallucinating a fake [MIC] message and
+                // Prevents the LLM from hallucinating a fake MIC message and
                 // self-authorizing destructive actions.
                 if !self.user_initiated_turn {
                     self.push_ticker("BLOCKED: orchestrator tried to terminate without user input".to_string());
@@ -1218,7 +1218,7 @@ impl App {
         self.push_ticker(format!("STRIKE TEAM: complete ({})", summary));
         self.push_chat("System", &format!("Strike Team '{}': complete ({}).", name, summary));
         if let Some(orch) = &mut self.orchestrator {
-            orch.send_message(&format!("[EVENT] STRIKE_TEAM_COMPLETE name={} result={}", name, summary));
+            orch.send_message(&format!("[D-{}:EVENT] STRIKE_TEAM_COMPLETE name={} result={}", orch.nonce(), name, summary));
         }
     }
 

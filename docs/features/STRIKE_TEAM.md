@@ -97,7 +97,7 @@ Runs inside the existing 16ms main loop tick — no new threads or async.
 2. Verifier reads the source document and checks each implementation against it
 3. Verifier looks for integration issues between tasks that isolated agents may have missed
 4. Verifier fixes any issues found, reports findings, then stops
-5. Console detects verifier idle/exit, transitions to Complete, and notifies the orchestrator via `[EVENT] STRIKE_TEAM_COMPLETE`
+5. Console detects verifier idle/exit, transitions to Complete, and notifies the orchestrator via `[D-{nonce}:EVENT] STRIKE_TEAM_COMPLETE`
 
 ### Agent Lifecycle
 

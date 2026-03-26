@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.4.6
+
+### Fixed
+
+- Protocol messages to the orchestrator now use per-session nonce prefixes (`[D-{nonce}:MIC]`, `[D-{nonce}:EVENT]`, `[D-{nonce}:AGENT_MSG]`) instead of plain `[MIC]`, `[EVENT]`, `[AGENT_MSG]`. A random 4-character hex nonce is generated each time the orchestrator spawns, making it difficult for the LLM to hallucinate valid protocol messages that could poison its own context.
+
 ## v0.4.5
 
 ### Fixed
