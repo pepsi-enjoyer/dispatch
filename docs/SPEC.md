@@ -53,7 +53,7 @@ sample-repo/
   (repo's own files)
 ```
 
-The `.dispatch/` directory is gitignored by the console on first run.
+The `.dispatch/` directory is created by the console at startup for each configured repo, and gitignored via an internal `.dispatch/.gitignore`.
 
 ### Shared Agent Memory
 
@@ -110,7 +110,7 @@ The radio sends raw voice transcripts to the console without any local parsing. 
 1. User speaks into the radio (push-to-talk or continuous listening).
 2. Radio transcribes speech via Android `SpeechRecognizer`.
 3. Raw transcript is sent to the console as `{"type":"send","text":"...","auto":true}`.
-4. Console forwards the transcript to the orchestrator as `[MIC] <transcript>`.
+4. Console forwards the transcript to the orchestrator as `[D-{nonce}:MIC] <transcript>` (nonce is a random per-session hex string).
 5. Orchestrator decides what action(s) to take and issues tool calls.
 6. Console executes the tool calls and returns results to the orchestrator.
 
@@ -143,7 +143,7 @@ The agent's PTY is launched in the repo root. The agent creates its own worktree
 
 **Idle detection:**
 
-The console monitors each agent's PTY output to detect activity. When an agent with a task produces no output for 10 seconds, it transitions to "idle" state -- this typically means the agent finished its work and is sitting at a prompt. The orchestrator is notified via an `[EVENT] AGENT_IDLE` message on each working-to-idle transition. Activity status is reported in `list_agents` as "working" or "idle" and shown in the TUI pane info strip.
+The console monitors each agent's PTY output to detect activity. When an agent with a task produces no output for 10 seconds, it transitions to "idle" state -- this typically means the agent finished its work and is sitting at a prompt. The orchestrator is notified via an `[D-{nonce}:EVENT] AGENT_IDLE` message on each working-to-idle transition. Activity status is reported in `list_agents` as "working" or "idle" and shown in the TUI pane info strip.
 
 **On completion:**
 
@@ -198,9 +198,11 @@ The `agent` parameter accepts either a callsign (e.g. "Alpha") or a slot number 
 
 ### Destructive Action Safeguard
 
-The `terminate` action is gated by user input authentication. The orchestrator LLM can only execute `terminate` when the current turn was triggered by an authentic voice or text message from Dispatch (a `[MIC]` message). If the orchestrator attempts to terminate an agent in response to a system event (`[EVENT]`, `[AGENT_MSG]`, or `<tool_result>`), the action is blocked with an error.
+The `terminate` action is gated by user input authentication. The orchestrator LLM can only execute `terminate` when the current turn was triggered by an authentic voice or text message from Dispatch (a `[D-{nonce}:MIC]` message). If the orchestrator attempts to terminate an agent in response to a system event, the action is blocked with an error.
 
 This prevents the LLM from hallucinating fake user messages and self-authorizing destructive actions. Each message sent to the orchestrator is tagged as user-originated or system-originated, and the tag is tracked through the pending queue so it correctly reflects the trigger for each turn.
+
+Additionally, all protocol messages use a random per-session nonce in their prefix (e.g. `[D-a8f3:MIC]`, `[D-a8f3:EVENT]`). The nonce is generated at orchestrator spawn time and communicated via the system prompt. This makes it difficult for the LLM to hallucinate valid protocol messages, since it would need to reproduce the exact nonce.
 
 When a terminate is blocked, the ticker displays "BLOCKED: orchestrator tried to terminate without user input" and a chat message is sent to the radio.
 
@@ -341,7 +343,7 @@ Runs inside the existing 16ms main loop tick -- no new threads or async.
 6. When an agent process exits unexpectedly: mark task `failed`, continue.
 7. When all tasks are `done` or `failed`: transition to Verifying phase and dispatch a verifier agent.
 8. The verifier reads the source document and task file, checks implementations, fixes issues, then stops.
-9. When the verifier goes idle or exits: transition to Complete and notify the orchestrator via `[EVENT] STRIKE_TEAM_COMPLETE name=<name> result=<done>/<total>`.
+9. When the verifier goes idle or exits: transition to Complete and notify the orchestrator via `[D-{nonce}:EVENT] STRIKE_TEAM_COMPLETE name=<name> result=<done>/<total>`.
 
 Each task agent follows the normal dispatch workflow: creates a worktree from latest main, works on its task, merges to main, pushes, cleans up, and goes idle. On idle detection, the console terminates the agent to free the slot for the next wave.
 
@@ -497,7 +499,7 @@ Sends a base64-encoded image targeted at a specific agent by callsign. The conso
 
 Pushed to all connected clients whenever the orchestrator produces text or other significant events occur. Not a response to any request -- the console pushes these proactively. The `sender` field identifies who said it: the configured `user_callsign` (default `"Dispatch"`) for voice transcripts, the configured `console_name` (default `"Console"`) for orchestrator decisions, or an agent callsign (e.g. `"Alpha"`) for agent status messages.
 
-**Agent status messages:** Agents write messages to `.dispatch/messages/{callsign}` files by appending lines via `echo "message" >> "$DISPATCH_MSG_FILE"`. The console polls these files for new content and broadcasts each new line as a chat message with the agent's callsign as the sender. Agent messages are also forwarded to the orchestrator LLM as `[AGENT_MSG] Callsign: text` so it can track agent progress. Agents are instructed to emit these at key workflow points (started, completed, merged).
+**Agent status messages:** Agents write messages to `.dispatch/messages/{callsign}` files by appending lines via `echo "message" >> "$DISPATCH_MSG_FILE"`. The console polls these files for new content and broadcasts each new line as a chat message with the agent's callsign as the sender. Agent messages are also forwarded to the orchestrator LLM as `[D-{nonce}:AGENT_MSG] Callsign: text` so it can track agent progress. Agents are instructed to emit these at key workflow points (started, completed, merged).
 
 **Error**
 

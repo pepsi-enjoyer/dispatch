@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.4.7
+
+### Fixed
+
+- `.dispatch/` directory is now created eagerly at startup for each configured repo, instead of lazily on first agent dispatch. Includes `messages/`, `images/`, `MEMORY.md`, and `.gitignore`.
+- Restructured orchestrator instructions with "Ground Rules" section at the top: do not use tools (blocks message reception), strike team requests should be issued immediately without reading the document first. Removes duplicate investigation rules.
+
+## v0.4.6
+
+### Fixed
+
+- Protocol messages to the orchestrator now use per-session nonce prefixes (`[D-{nonce}:MIC]`, `[D-{nonce}:EVENT]`, `[D-{nonce}:AGENT_MSG]`) instead of plain `[MIC]`, `[EVENT]`, `[AGENT_MSG]`. A random 4-character hex nonce is generated each time the orchestrator spawns, making it difficult for the LLM to hallucinate valid protocol messages that could poison its own context.
+
 ## v0.4.5
 
 ### Fixed

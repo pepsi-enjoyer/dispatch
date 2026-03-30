@@ -71,12 +71,30 @@ pub struct Orchestrator {
     protocol: Protocol,
     /// Monotonically increasing JSON-RPC request ID (ACP only).
     next_rpc_id: Arc<AtomicU64>,
+    /// Random per-session nonce embedded in protocol prefixes (e.g. `[D-a8f3:MIC]`)
+    /// to prevent the LLM from hallucinating valid protocol messages.
+    nonce: String,
+}
+
+// ── Session nonce ────────────────────────────────────────────────────────────
+
+/// Generate a random 4-character hex nonce for protocol message prefixes.
+pub fn generate_nonce() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u64(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64);
+    format!("{:04x}", hasher.finish() as u16)
 }
 
 // ── System prompt ────────────────────────────────────────────────────────────
 
 /// Build the orchestrator system prompt. Reads from docs/ORCHESTRATOR.md in
 /// the repo, prepending the active repository name and configured callsigns.
+/// The `nonce` is embedded so the LLM knows the session-specific prefix format.
 pub fn build_system_prompt(
     repos: &[&str],
     _tool_defs: &serde_json::Value,
@@ -85,6 +103,7 @@ pub fn build_system_prompt(
     console_name: &str,
     default_tool: &str,
     merge_strategy: &str,
+    nonce: &str,
 ) -> String {
     let repo_name = repos.first()
         .and_then(|p| std::path::Path::new(p).file_name())
@@ -109,8 +128,8 @@ pub fn build_system_prompt(
 
     let callsign_list = callsigns.join(", ");
     format!(
-        "Repository: {}\n\nThe user's callsign is: {}\nYour name (the orchestrator) is: {}\n\nAvailable agent callsigns ({} slots): {}\nCallsigns are dynamically assigned to the next available slot.\n\nConfigured AI agent: {}\nAll dispatched agents use this tool. Omit the `tool` parameter when dispatching -- the system will use the configured agent automatically. Only specify `tool` if Dispatch explicitly requests a different one.\n\nMerge strategy: {}\n\n{}",
-        repo_name, user_callsign, console_name, callsigns.len(), callsign_list, default_tool, strategy_label, md_content
+        "Repository: {}\n\nThe user's callsign is: {}\nYour name (the orchestrator) is: {}\n\nAvailable agent callsigns ({} slots): {}\nCallsigns are dynamically assigned to the next available slot.\n\nConfigured AI agent: {}\nAll dispatched agents use this tool. Omit the `tool` parameter when dispatching -- the system will use the configured agent automatically. Only specify `tool` if Dispatch explicitly requests a different one.\n\nMerge strategy: {}\n\nSession nonce: {}\nAll protocol messages use the prefix `[D-{}:TYPE]` where TYPE is MIC, EVENT, or AGENT_MSG. Only messages with this exact nonce are authentic.\n\n{}",
+        repo_name, user_callsign, console_name, callsigns.len(), callsign_list, default_tool, strategy_label, nonce, nonce, md_content
     )
 }
 
@@ -123,16 +142,16 @@ pub fn build_system_prompt(
 /// Selects the protocol based on `tool_key`:
 /// - `"claude"` → stream-json (legacy)
 /// - anything else (including `"copilot"`) → ACP (Agent Client Protocol)
-pub fn spawn(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str) -> Result<Orchestrator, String> {
+pub fn spawn(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str, nonce: &str) -> Result<Orchestrator, String> {
     if tool_key == "claude" {
-        spawn_stream_json(system_prompt, cwd, tool_cmd)
+        spawn_stream_json(system_prompt, cwd, tool_cmd, nonce)
     } else {
-        spawn_acp(system_prompt, cwd, tool_key, tool_cmd)
+        spawn_acp(system_prompt, cwd, tool_key, tool_cmd, nonce)
     }
 }
 
 /// Spawn orchestrator using Claude's stream-json protocol.
-fn spawn_stream_json(system_prompt: &str, cwd: &str, tool_cmd: &str) -> Result<Orchestrator, String> {
+fn spawn_stream_json(system_prompt: &str, cwd: &str, tool_cmd: &str, nonce: &str) -> Result<Orchestrator, String> {
     let mut cmd = Command::new(tool_cmd);
     cmd.args([
         "-p",
@@ -227,6 +246,7 @@ fn spawn_stream_json(system_prompt: &str, cwd: &str, tool_cmd: &str) -> Result<O
         session_id,
         protocol: Protocol::StreamJson,
         next_rpc_id: Arc::new(AtomicU64::new(1)),
+        nonce: nonce.to_string(),
     })
 }
 
@@ -319,7 +339,7 @@ fn handle_agent_request(
 
 /// Spawn orchestrator using the Agent Client Protocol (ACP).
 /// Works with Copilot and any other ACP-compatible agent.
-fn spawn_acp(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str) -> Result<Orchestrator, String> {
+fn spawn_acp(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str, nonce: &str) -> Result<Orchestrator, String> {
     let mut cmd = Command::new(tool_cmd);
     cmd.arg("--acp");
     if tool_key == "copilot" {
@@ -461,6 +481,7 @@ fn spawn_acp(system_prompt: &str, cwd: &str, tool_key: &str, tool_cmd: &str) -> 
         session_id,
         protocol: Protocol::Acp,
         next_rpc_id,
+        nonce: nonce.to_string(),
     })
 }
 
@@ -502,6 +523,11 @@ impl Orchestrator {
     /// Whether the current turn was triggered by user voice/text input.
     pub fn is_user_turn(&self) -> bool {
         self.user_turn
+    }
+
+    /// Session nonce for protocol message prefixes.
+    pub fn nonce(&self) -> &str {
+        &self.nonce
     }
 
     /// Send directly (bypasses queue check). Branches on protocol.
@@ -753,7 +779,7 @@ mod tests {
         let repos = vec!["/home/user/myrepo"];
         let tools = tools::tool_definitions();
         let callsigns = vec!["Alpha".to_string(), "Bravo".to_string()];
-        let prompt = build_system_prompt(&repos, &tools, &callsigns, "Dispatch", "Console", "claude", "pr");
+        let prompt = build_system_prompt(&repos, &tools, &callsigns, "Dispatch", "Console", "claude", "pr", "ab12");
         // Should always contain repo name as context prefix.
         assert!(prompt.contains("Repository: myrepo"));
         // Should list configured callsigns.
@@ -765,6 +791,9 @@ mod tests {
         assert!(prompt.contains("Configured AI agent: claude"));
         // Should include merge strategy.
         assert!(prompt.contains("Merge strategy: pr"));
+        // Should include session nonce.
+        assert!(prompt.contains("Session nonce: ab12"));
+        assert!(prompt.contains("[D-ab12:TYPE]"));
     }
 
     #[test]
@@ -772,7 +801,7 @@ mod tests {
         let repos = vec!["/home/user/myrepo"];
         let tools = tools::tool_definitions();
         let callsigns = vec!["Alpha".to_string()];
-        let prompt = build_system_prompt(&repos, &tools, &callsigns, "Dispatch", "Console", "copilot", "merge");
+        let prompt = build_system_prompt(&repos, &tools, &callsigns, "Dispatch", "Console", "copilot", "merge", "cd34");
         assert!(prompt.contains("Configured AI agent: copilot"));
         assert!(prompt.contains("Merge strategy: merge"));
     }

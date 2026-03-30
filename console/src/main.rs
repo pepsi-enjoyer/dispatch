@@ -185,8 +185,9 @@ fn main() -> io::Result<()> {
         cfg.identity.console_name.clone(),
     );
 
-    // Clear stale agent message and image files from previous sessions.
+    // Ensure .dispatch/ directory exists for each repo, then clear stale files.
     for repo in &app.repo_list() {
+        util::ensure_dispatch_dir(repo);
         util::clean_dispatch_dirs(repo);
     }
 
@@ -214,8 +215,9 @@ fn main() -> io::Result<()> {
         thread::spawn(move || {
             let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
             let tool_defs = tools::tool_definitions();
-            let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt, &ms);
-            let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc));
+            let nonce = orchestrator::generate_nonce();
+            let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt, &ms, &nonce);
+            let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc, &nonce));
         });
     }
     app.push_ticker("ORCHESTRATOR: starting...".to_string());
@@ -259,13 +261,13 @@ fn main() -> io::Result<()> {
                     app.push_orch(OrchestratorEventKind::TaskComplete { id: id.clone(), agent: callsign.clone() });
                     // Notify orchestrator of completion so it can decide next steps.
                     if let Some(orch) = &mut app.orchestrator {
-                        orch.send_message(&format!("[EVENT] TASK_COMPLETE agent={} task={}", callsign, id));
+                        orch.send_message(&format!("[D-{}:EVENT] TASK_COMPLETE agent={} task={}", orch.nonce(), callsign, id));
                     }
                     app.push_ticker(format!("TASK COMPLETE: {} closed {} — slot {} now standby", callsign, id, i + 1));
                 } else {
                     app.push_ticker(format!("AGENT EXITED: {} (slot {}) — standby", callsign, i + 1));
                     if let Some(orch) = &mut app.orchestrator {
-                        orch.send_message(&format!("[EVENT] AGENT_EXITED agent={} slot={}", callsign, i + 1));
+                        orch.send_message(&format!("[D-{}:EVENT] AGENT_EXITED agent={} slot={}", orch.nonce(), callsign, i + 1));
                     }
                 }
             }
@@ -297,8 +299,8 @@ fn main() -> io::Result<()> {
                         let callsign = s.display_name().to_string();
                         if let Some(orch) = &mut app.orchestrator {
                             orch.send_message(&format!(
-                                "[EVENT] AGENT_IDLE agent={} slot={}",
-                                callsign, i + 1
+                                "[D-{}:EVENT] AGENT_IDLE agent={} slot={}",
+                                orch.nonce(), callsign, i + 1
                             ));
                         }
                         // Strike team: mark task done and free the slot.
@@ -356,7 +358,7 @@ fn main() -> io::Result<()> {
                         let pending: Vec<String> = app.pending_voice.drain(..).collect();
                         if let Some(orch) = &mut app.orchestrator {
                             for msg in pending {
-                                orch.send_user_message(&format!("[MIC] {}", msg));
+                                orch.send_user_message(&format!("[D-{}:MIC] {}", orch.nonce(), msg));
                             }
                         }
                     }
@@ -387,7 +389,7 @@ fn main() -> io::Result<()> {
                     app.push_orch(OrchestratorEventKind::VoiceTranscript { text: text.clone() });
                     app.push_chat(&app.user_callsign, &text);
                     if let Some(orch) = &mut app.orchestrator {
-                        orch.send_user_message(&format!("[MIC] {}", text));
+                        orch.send_user_message(&format!("[D-{}:MIC] {}", orch.nonce(), text));
                     } else {
                         app.pending_voice.push(text);
                     }
@@ -436,8 +438,8 @@ fn main() -> io::Result<()> {
                                 // Notify orchestrator so it has visibility.
                                 if let Some(orch) = &mut app.orchestrator {
                                     orch.send_message(&format!(
-                                        "[EVENT] IMAGE_SENT to={} file={}",
-                                        callsign, filename
+                                        "[D-{}:EVENT] IMAGE_SENT to={} file={}",
+                                        orch.nonce(), callsign, filename
                                     ));
                                 }
                             }
@@ -473,8 +475,9 @@ fn main() -> io::Result<()> {
                     thread::spawn(move || {
                         let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
                         let tool_defs = tools::tool_definitions();
-                        let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt, &ms);
-                        let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc));
+                        let nonce = orchestrator::generate_nonce();
+                        let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt, &ms, &nonce);
+                        let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc, &nonce));
                     });
                 }
             }
@@ -499,7 +502,7 @@ fn main() -> io::Result<()> {
             // Forward agent status messages to the orchestrator so it has
             // visibility into agent progress (e.g. "Task received", "Merging").
             if let Some(orch) = &mut app.orchestrator {
-                orch.send_message(&format!("[AGENT_MSG] {}: {}", callsign, text));
+                orch.send_message(&format!("[D-{}:AGENT_MSG] {}: {}", orch.nonce(), callsign, text));
             }
         }
 
@@ -523,7 +526,7 @@ fn main() -> io::Result<()> {
 
                     // dispatch-chat: forward orchestrator reasoning to radio
                     // (strip action blocks, system context tags, and internal
-                    // [EVENT] lines so raw LLM framework artifacts don't leak).
+                    // protocol lines so raw LLM framework artifacts don't leak).
                     let chat_text = util::strip_action_blocks(&text);
                     let chat_text = util::strip_system_tags(&chat_text);
                     let chat_text = util::strip_event_lines(&chat_text);
@@ -908,8 +911,9 @@ fn main() -> io::Result<()> {
                                             thread::spawn(move || {
                                                 let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
                                                 let tool_defs = tools::tool_definitions();
-                                                let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt, &ms);
-                                                let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc));
+                                                let nonce = orchestrator::generate_nonce();
+                                                let system_prompt = orchestrator::build_system_prompt(&repo_refs, &tool_defs, &cs, &uc, &cn, &dt, &ms, &nonce);
+                                                let _ = tx.send(orchestrator::spawn(&system_prompt, &cwd, &dt, &cc, &nonce));
                                             });
                                         }
                                     }

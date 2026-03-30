@@ -156,23 +156,66 @@ pub fn strip_system_tags(text: &str) -> String {
     result
 }
 
-/// Remove lines with internal message prefixes that the orchestrator receives
-/// for coordination but should never be forwarded to user-facing chat on the
-/// radio. Strips `[EVENT]`, `[AGENT_MSG]`, `[MIC]`, and `Human:` prefixed
-/// lines so the LLM cannot echo or fabricate them into the chat stream.
-/// `Human:` is particularly dangerous because it creates fake conversation
-/// turns that look like real user input.
+/// Remove lines with internal protocol prefixes from orchestrator output
+/// before forwarding to user-facing chat. Strips `[D-xxxx:EVENT]`,
+/// `[D-xxxx:AGENT_MSG]`, `[D-xxxx:MIC]`, and `Human:` prefixed lines.
+/// The `[D-` prefix matches any session nonce.
 pub fn strip_event_lines(text: &str) -> String {
     text.lines()
         .filter(|line| {
             let trimmed = line.trim_start();
-            !trimmed.starts_with("[EVENT]")
-                && !trimmed.starts_with("[AGENT_MSG]")
-                && !trimmed.starts_with("[MIC]")
+            !is_protocol_line(trimmed)
                 && !trimmed.starts_with("Human:")
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Check if a line starts with a protocol prefix: `[D-xxxx:TYPE]` where
+/// TYPE is EVENT, AGENT_MSG, or MIC.
+fn is_protocol_line(s: &str) -> bool {
+    if !s.starts_with("[D-") { return false; }
+    // Find the closing `]` and check for a known type after the colon.
+    if let Some(bracket_end) = s.find(']') {
+        let inside = &s[3..bracket_end]; // after "[D-"
+        if let Some(colon) = inside.find(':') {
+            let msg_type = &inside[colon + 1..];
+            return matches!(msg_type, "EVENT" | "AGENT_MSG" | "MIC");
+        }
+    }
+    false
+}
+
+/// Ensure the `.dispatch/` directory tree exists for a repo and add a
+/// `.gitignore` so dispatch artifacts are never committed. Called at startup.
+pub fn ensure_dispatch_dir(repo_root: &str) {
+    let dispatch_dir = format!("{}/.dispatch", repo_root);
+    for subdir in &["messages", "images"] {
+        let _ = std::fs::create_dir_all(format!("{}/{}", dispatch_dir, subdir));
+    }
+
+    // Seed MEMORY.md if missing.
+    let memory_path = format!("{}/MEMORY.md", dispatch_dir);
+    if !std::path::Path::new(&memory_path).exists() {
+        let template = "\
+# Shared Agent Memory
+
+Knowledge base from prior agents. Updated when agents learn something valuable.
+
+## Build & Test
+
+## Gotchas
+
+## Notes
+";
+        let _ = std::fs::write(&memory_path, template);
+    }
+
+    // Ensure .gitignore exists so .dispatch/ is never committed.
+    let gitignore_path = format!("{}/.gitignore", dispatch_dir);
+    if !std::path::Path::new(&gitignore_path).exists() {
+        let _ = std::fs::write(&gitignore_path, "*\n");
+    }
 }
 
 /// Clear stale `.dispatch/messages/` and `.dispatch/images/` contents for a repo.
