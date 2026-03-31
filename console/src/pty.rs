@@ -78,15 +78,17 @@ const WORKFLOW_PR: &str = "\
    git worktree remove .dispatch/.worktrees/{callsign} --force
    ```";
 
-/// Build agent instructions by reading `docs/AGENTS.md` and swapping the
-/// workflow finalization step based on `merge_strategy`.  Also appends
-/// shared memory if any prior agents have written to it.
+/// Agent instructions bundled at compile time.
+const AGENTS_MD: &str = include_str!("../../docs/AGENTS.md");
+
+/// Build agent instructions using the compile-time-bundled AGENTS.md and
+/// swapping the workflow finalization step based on `merge_strategy`.  Also
+/// appends shared memory if any prior agents have written to it.
 ///
 /// Returns the full instruction text ready for injection as a system prompt
 /// (Claude) or written to `.dispatch/instructions/AGENTS.md` (Copilot).
 fn build_agent_instructions(repo_root: &str, merge_strategy: &str) -> Option<String> {
-    let agents_md_path = format!("{}/docs/AGENTS.md", repo_root);
-    let mut instructions = std::fs::read_to_string(&agents_md_path).ok()?;
+    let mut instructions = AGENTS_MD.to_string();
 
     // Replace the merge/PR workflow block between markers.
     // Uses HTML comment markers in AGENTS.md for robust matching.
