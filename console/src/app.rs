@@ -1257,6 +1257,14 @@ impl App {
                 callsign, commit_prefix, commit_prefix, source_file, prompt
             );
 
+            // In PR mode, strike team task agents only push their branch --
+            // the verifier consolidates all branches into one PR later.
+            let task_strategy = if self.merge_strategy == "pr" {
+                "pr-strike-team"
+            } else {
+                &self.merge_strategy
+            };
+
             match dispatch_slot(
                 slot_idx,
                 &effective_tool,
@@ -1269,7 +1277,7 @@ impl App {
                 &repo,
                 Some(&full_prompt),
                 &callsign,
-                &self.merge_strategy,
+                task_strategy,
                 Some(&commit_prefix),
             ) {
                 Some(slot) => {
@@ -1386,16 +1394,90 @@ impl App {
 
     /// Dispatch a verifier agent after all tasks are done. Transitions to Verifying.
     fn strike_team_dispatch_verifier(&mut self, st_idx: usize) {
-        let (repo, source_file, task_file_path, name) = {
+        let (repo, source_file, task_file_path, name, consolidation_instructions) = {
             let st = match self.strike_teams.get(st_idx) {
                 Some(st) => st,
                 None => return,
             };
+
+            // In PR mode, build consolidation instructions listing every
+            // successfully-completed task branch for the verifier to merge.
+            let consolidation = if self.merge_strategy == "pr" {
+                let branches: Vec<String> = st
+                    .tasks
+                    .iter()
+                    .filter(|t| {
+                        t.status == dispatch_core::strike_team::TaskStatus::Done
+                            && t.agent.is_some()
+                    })
+                    .map(|t| {
+                        format!(
+                            "- `origin/dispatch/{}` ({}: {})",
+                            t.agent.as_ref().unwrap(),
+                            t.id,
+                            t.title,
+                        )
+                    })
+                    .collect();
+
+                let merge_cmds: String = st
+                    .tasks
+                    .iter()
+                    .filter(|t| {
+                        t.status == dispatch_core::strike_team::TaskStatus::Done
+                            && t.agent.is_some()
+                    })
+                    .map(|t| {
+                        format!(
+                            "git merge origin/dispatch/{} --no-ff -m \"Merge {}: {}\"",
+                            t.agent.as_ref().unwrap(),
+                            t.id,
+                            t.title,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let cleanup_cmds: String = st
+                    .tasks
+                    .iter()
+                    .filter(|t| {
+                        t.status == dispatch_core::strike_team::TaskStatus::Done
+                            && t.agent.is_some()
+                    })
+                    .map(|t| {
+                        format!(
+                            "git push origin --delete dispatch/{}",
+                            t.agent.as_ref().unwrap(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                format!(
+                    "\n\n## PR Consolidation\n\n\
+                     Before verifying, consolidate all task branches into yours. \
+                     The strike team name is: {}\n\n\
+                     Task branches:\n{}\n\n\
+                     Fetch and merge each one:\n```bash\ngit fetch origin\n{}\n```\n\n\
+                     If any merge conflicts occur, resolve them manually and commit.\n\n\
+                     After verification and any fixes, clean up remote task branches:\n\
+                     ```bash\n{}\n```\n",
+                    st.name,
+                    branches.join("\n"),
+                    merge_cmds,
+                    cleanup_cmds,
+                )
+            } else {
+                String::new()
+            };
+
             (
                 st.repo.clone(),
                 st.source_file.clone(),
                 st.task_file_path.clone(),
                 st.name.clone(),
+                consolidation,
             )
         };
 
@@ -1420,10 +1502,19 @@ impl App {
                 VERIFIER_MD,
                 &[
                     ("{source_file}", &source_file),
-                    ("{task_file_path}", &task_file_path)
+                    ("{task_file_path}", &task_file_path),
+                    ("{consolidation_instructions}", &consolidation_instructions),
                 ],
             )
         );
+
+        // In PR mode the verifier uses the special pr-verifier workflow
+        // which creates the single consolidated PR.
+        let verifier_strategy = if self.merge_strategy == "pr" {
+            "pr-verifier"
+        } else {
+            &self.merge_strategy
+        };
 
         match dispatch_slot(
             slot_idx,
@@ -1437,7 +1528,7 @@ impl App {
             &repo,
             Some(&verifier_prompt),
             &callsign,
-            &self.merge_strategy,
+            verifier_strategy,
             None,
         ) {
             Some(slot) => {
